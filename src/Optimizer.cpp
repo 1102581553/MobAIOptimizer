@@ -3,9 +3,10 @@
 #include <ll/api/service/Bedrock.h>
 #include <ll/api/mod/RegisterHelper.h>
 #include <mc/world/actor/Mob.h>
-#include <mc/world/level/Level.h>
 #include <mc/world/actor/Actor.h>
-#include <mc/world/level/Tick.h>  // 必须包含 Tick 定义
+#include <mc/world/level/Level.h>
+#include <mc/world/level/Tick.h>
+#include <mc/legacy/ActorUniqueID.h>
 
 namespace mob_ai_optimizer {
 
@@ -40,36 +41,33 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
     MobAiStepHook,
     ll::memory::HookPriority::Normal,
     Mob,
-    &Mob::$aiStep,  // 使用成员指针，而非字符串
+    &Mob::$aiStep,
     void
 ) {
     using namespace mob_ai_optimizer;
 
     auto& level = this->getLevel();
     auto currentTick = level.getCurrentServerTick().tickID;
+    int tickInt = static_cast<int>(currentTick);
 
-    // 检测 tick 变化，重置计数器
-    if (currentTick != currentTickId) {
-        currentTickId = currentTick;
+    if (tickInt != currentTickId) {
+        currentTickId = tickInt;
         processedThisTick = 0;
     }
 
-    auto id = this->getUniqueID();
+    ActorUniqueID id = this->getUniqueID();
 
-    // 频率限制：每个生物至少间隔 COOLDOWN_TICKS 才执行一次 AI
     auto it = lastAiTick.find(id);
-    if (it != lastAiTick.end() && currentTick - it->second < COOLDOWN_TICKS) {
+    if (it != lastAiTick.end() && tickInt - it->second < COOLDOWN_TICKS) {
         return;
     }
 
-    // 时间切片：本 tick 已处理的生物数量达到上限，则跳过
     if (processedThisTick >= MAX_PER_TICK) {
         return;
     }
 
-    // 执行原 AI
     processedThisTick++;
-    lastAiTick[id] = currentTick;
+    lastAiTick[id] = tickInt;
     origin();
 }
 
@@ -81,7 +79,6 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
     &Actor::$remove,
     void
 ) {
-    // 清理该实体的 AI 记录
     mob_ai_optimizer::lastAiTick.erase(this->getUniqueID());
     origin();
 }
