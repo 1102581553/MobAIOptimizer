@@ -2,6 +2,8 @@
 #include <ll/api/memory/Hook.h>
 #include <ll/api/service/Bedrock.h>
 #include <ll/api/mod/RegisterHelper.h>
+#include <ll/api/event/EventBus.h>
+#include <ll/api/event/actor/ActorRemovedEvent.h>   // 根据实际路径调整
 #include <mc/world/actor/Mob.h>
 #include <mc/world/actor/Actor.h>
 #include <mc/world/level/Level.h>
@@ -25,11 +27,28 @@ bool Optimizer::load() {
 }
 
 bool Optimizer::enable() {
+    // 注册 ActorRemovedEvent 监听器，清理已移除实体的缓存
+    auto& eventBus = ll::event::EventBus::getInstance();
+    mListener = eventBus.emplaceListener<ll::event::actor::ActorRemovedEvent>(
+        [](ll::event::actor::ActorRemovedEvent& ev) {
+            // 从事件中获取被移除的实体指针（API 可能为 getActor() 或 self()）
+            if (auto actor = ev.getActor()) {          // 假设事件提供 getActor()
+                lastAiTick.erase(actor->getOrCreateUniqueID());
+            }
+        }
+    );
+
     getSelf().getLogger().info("生物AI优化插件已启用");
     return true;
 }
 
 bool Optimizer::disable() {
+    // 取消事件监听
+    if (mListener) {
+        auto& eventBus = ll::event::EventBus::getInstance();
+        eventBus.removeListener(mListener);
+        mListener = nullptr;
+    }
     getSelf().getLogger().info("生物AI优化插件已禁用");
     return true;
 }
@@ -46,7 +65,8 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
 ) {
     using namespace mob_ai_optimizer;
 
-    auto& level = this->getLevel();
+    Mob* self = (Mob*)this;                           // 转换为 Mob 指针
+    auto& level = self->getLevel();
     auto currentTick = level.getCurrentServerTick().tickID;
     int tickInt = static_cast<int>(currentTick);
 
@@ -55,7 +75,7 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
         processedThisTick = 0;
     }
 
-    ActorUniqueID id = this->getUniqueID();
+    ActorUniqueID id = self->getOrCreateUniqueID();   // 正确获取唯一ID
 
     auto it = lastAiTick.find(id);
     if (it != lastAiTick.end() && tickInt - it->second < COOLDOWN_TICKS) {
@@ -68,18 +88,6 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
 
     processedThisTick++;
     lastAiTick[id] = tickInt;
-    origin();
-}
-
-// Hook Actor::remove 的 thunk 函数，用于清理缓存
-LL_AUTO_TYPE_INSTANCE_HOOK(
-    ActorRemoveHook,
-    ll::memory::HookPriority::Normal,
-    Actor,
-    &Actor::$remove,
-    void
-) {
-    mob_ai_optimizer::lastAiTick.erase(this->getUniqueID());
     origin();
 }
 
