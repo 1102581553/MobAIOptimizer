@@ -1,7 +1,6 @@
 #pragma once
 
 #include <ll/api/mod/NativeMod.h>
-#include <ll/api/event/Listener.h>          // 用于 ListenerPtr
 #include <mc/legacy/ActorUniqueID.h>
 #include <unordered_map>
 
@@ -21,7 +20,7 @@ public:
 
 private:
     ll::mod::NativeMod& mSelf;
-    ll::event::ListenerPtr mListener;        // 保存事件监听器句柄
+    class ActorEventListener* mListener;  // Changed to ActorEventListener*
 };
 
 // 全局数据
