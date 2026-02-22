@@ -4,6 +4,7 @@ set_version("1.0.0")
 add_repositories("levimc-repo https://github.com/LiteLDev/xmake-repo.git")
 
 add_requires("levilamina 1.9.5", {configs = {target_type = "server"}})
+add_requires("levibuildscript")  -- 添加此依赖以使用 @levibuildscript 规则
 
 if not has_config("vs_runtime") then
     set_runtimes("MD")
