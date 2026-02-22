@@ -1,13 +1,13 @@
 #pragma once
 
-#include <ll/api/plugin/Plugin.h>
+#include <ll/api/mod/NativeMod.h>
 #include <ll/api/event/Listener.h>
 #include <mc/legacy/ActorUniqueID.h>
 #include <unordered_map>
 
 namespace mob_ai_optimizer {
 
-class Optimizer : public ll::plugin::Plugin {
+class Optimizer {
 public:
     static Optimizer& getInstance();
 
@@ -15,9 +15,9 @@ public:
 
     [[nodiscard]] ll::mod::NativeMod& getSelf() const { return mSelf; }
 
-    bool onLoad() override;
-    bool onEnable() override;
-    bool onDisable() override;
+    bool load();
+    bool enable();
+    bool disable();
 
 private:
     ll::event::ListenerPtr mRemoveListener;
