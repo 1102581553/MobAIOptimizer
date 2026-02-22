@@ -1,27 +1,10 @@
 #pragma once
 
-#include <ll/api/Config.h>
-#include <ll/api/io/Logger.h>
 #include <ll/api/mod/NativeMod.h>
+#include <mc/legacy/ActorUniqueID.h>
+#include <unordered_map>
 
 namespace mob_ai_optimizer {
-
-struct Config {
-    int version = 1;
-    bool enabled = true;
-    bool debug = false;
-    int cooldownTicks = 20;        // AI 冷却时间（tick）
-    int maxPerTick = 50;            // 每 tick 最多处理的生物数
-    int cleanupInterval = 1000;     // 过期清理间隔（tick）
-    int maxExpiredAge = 10000;      // 过期阈值（tick）
-};
-
-Config& getConfig();
-bool loadConfig();
-bool saveConfig();
-
-void clearCache();
-ll::io::Logger& logger();
 
 class Optimizer {
 public:
@@ -38,5 +21,14 @@ public:
 private:
     ll::mod::NativeMod& mSelf;
 };
+
+// 全局数据
+extern std::unordered_map<ActorUniqueID, int> lastAiTick;
+extern int processedThisTick;
+extern int currentTickId;
+
+// 配置常量
+constexpr int COOLDOWN_TICKS = 20;   // 每个生物至少间隔40 tick执行AI
+constexpr int MAX_PER_TICK   = 20;  // 每tick最多处理20个生物
 
 } // namespace mob_ai_optimizer
