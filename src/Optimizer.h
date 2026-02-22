@@ -1,7 +1,6 @@
 #pragma once
 
 #include <ll/api/mod/NativeMod.h>
-#include <ll/api/event/Listener.h>
 #include <mc/legacy/ActorUniqueID.h>
 #include <unordered_map>
 
@@ -20,7 +19,6 @@ public:
     bool disable();
 
 private:
-    ll::event::ListenerPtr mRemoveListener;
     ll::mod::NativeMod& mSelf;
 };
 
