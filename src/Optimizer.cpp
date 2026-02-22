@@ -6,7 +6,7 @@
 #include <ll/api/chrono/GameChrono.h>
 #include <ll/api/coro/CoroTask.h>
 #include <ll/api/thread/ServerThreadExecutor.h>
-#include <ll/api/config/Config.h>
+#include <ll/api/Config.h>
 #include <mc/world/actor/Mob.h>
 #include <mc/world/actor/Actor.h>
 #include <mc/world/level/Level.h>
