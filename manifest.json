@@ -1,7 +1,8 @@
 {
-    "name": "${modName}",
-    "entry": "${modFile}",
-    "version": "${modVersion}",
+    "entry": "MobAIOptimizer.dll",
+    "name": "MobAIOptimizer",
     "type": "native",
-    "platform": "${modPlatform}"
+    "version": "1.0.0",
+    "description": "Optimizes mob AI by time-slicing and frequency limiting.",
+    "platform": "server"
 }
