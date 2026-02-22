@@ -1,11 +1,10 @@
 #include "Optimizer.h"
 #include <ll/api/memory/Hook.h>
-#include <ll/api/event/EventBus.h>
-#include <ll/api/event/actor/ActorRemoveEvent.h>
 #include <ll/api/service/Bedrock.h>
 #include <ll/api/mod/RegisterHelper.h>
 #include <mc/world/actor/Mob.h>
 #include <mc/world/level/Level.h>
+#include <mc/world/actor/Actor.h>
 
 namespace mob_ai_optimizer {
 
@@ -24,22 +23,11 @@ bool Optimizer::load() {
 }
 
 bool Optimizer::enable() {
-    // 订阅实体移除事件，清理缓存
-    auto& eventBus = ll::event::EventBus::getInstance();
-    mRemoveListener = eventBus.emplaceListener<ll::event::actor::ActorRemoveEvent>(
-        [](ll::event::actor::ActorRemoveEvent& ev) {
-            lastAiTick.erase(ev.self().getUniqueID());
-        }
-    );
     getSelf().getLogger().info("生物AI优化插件已启用");
     return true;
 }
 
 bool Optimizer::disable() {
-    if (mRemoveListener) {
-        ll::event::EventBus::getInstance().removeListener(mRemoveListener);
-        mRemoveListener = nullptr;
-    }
     getSelf().getLogger().info("生物AI优化插件已禁用");
     return true;
 }
@@ -51,7 +39,7 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
     MobAiStepHook,
     ll::memory::HookPriority::Normal,
     Mob,
-    "$aiStep",  // 直接使用 thunk 函数名，无需修饰名
+    "$aiStep",
     void
 ) {
     using namespace mob_ai_optimizer;
@@ -66,20 +54,33 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
 
     auto id = this->getUniqueID();
 
-    // 1. 频率限制：每个生物至少间隔 COOLDOWN_TICKS 才执行一次 AI
+    // 频率限制：每个生物至少间隔 COOLDOWN_TICKS 才执行一次 AI
     auto it = lastAiTick.find(id);
     if (it != lastAiTick.end() && currentTick - it->second < COOLDOWN_TICKS) {
-        return; // 跳过
+        return;
     }
 
-    // 2. 时间切片：本 tick 已处理的生物数量达到上限，则跳过
+    // 时间切片：本 tick 已处理的生物数量达到上限，则跳过
     if (processedThisTick >= MAX_PER_TICK) {
         return;
     }
 
-    // 3. 执行原 AI
+    // 执行原 AI
     processedThisTick++;
     lastAiTick[id] = currentTick;
+    origin();
+}
+
+// Hook Actor::remove 的 thunk 函数，用于清理缓存
+LL_AUTO_TYPE_INSTANCE_HOOK(
+    ActorRemoveHook,
+    ll::memory::HookPriority::Normal,
+    Actor,
+    "$remove",
+    void
+) {
+    // 清理该实体的 AI 记录
+    mob_ai_optimizer::lastAiTick.erase(this->getUniqueID());
     origin();
 }
 
