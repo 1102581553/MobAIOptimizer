@@ -28,7 +28,7 @@ extern int processedThisTick;
 extern int currentTickId;
 
 // 配置常量
-constexpr int COOLDOWN_TICKS = 5;   // 每个生物至少间隔5 tick执行AI
-constexpr int MAX_PER_TICK   = 50;  // 每tick最多处理50个生物
+constexpr int COOLDOWN_TICKS = 20;   // 每个生物至少间隔20 tick执行AI
+constexpr int MAX_PER_TICK   = 20;  // 每tick最多处理20个生物
 
 } // namespace mob_ai_optimizer
