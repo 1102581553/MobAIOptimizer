@@ -5,6 +5,7 @@
 #include <mc/world/actor/Mob.h>
 #include <mc/world/level/Level.h>
 #include <mc/world/actor/Actor.h>
+#include <mc/world/level/Tick.h>  // 必须包含 Tick 定义
 
 namespace mob_ai_optimizer {
 
@@ -39,12 +40,13 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
     MobAiStepHook,
     ll::memory::HookPriority::Normal,
     Mob,
-    "$aiStep",
+    &Mob::$aiStep,  // 使用成员指针，而非字符串
     void
 ) {
     using namespace mob_ai_optimizer;
 
-    auto currentTick = this->getLevel().getCurrentServerTick().tickID;
+    auto& level = this->getLevel();
+    auto currentTick = level.getCurrentServerTick().tickID;
 
     // 检测 tick 变化，重置计数器
     if (currentTick != currentTickId) {
@@ -76,7 +78,7 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
     ActorRemoveHook,
     ll::memory::HookPriority::Normal,
     Actor,
-    "$remove",
+    &Actor::$remove,
     void
 ) {
     // 清理该实体的 AI 记录
