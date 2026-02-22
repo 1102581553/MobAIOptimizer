@@ -1,16 +1,16 @@
 #include "Optimizer.h"
 #include <ll/api/memory/Hook.h>
 #include <ll/api/mod/RegisterHelper.h>
-#include <mc/world/actor/Mob.h>
-#include <mc/world/actor/Actor.h>
-#include <mc/world/level/Level.h>
-#include <mc/world/level/Tick.h>
-#include <mc/legacy/ActorUniqueID.h>
+#include <ll/api/io/FileUtils.h>
+#include <nlohmann/json.hpp>
+#include <filesystem>
 
 namespace mob_ai_optimizer {
 
+Config config{};
 std::unordered_map<ActorUniqueID, int> lastAiTick;
 int processedThisTick = 0;
+int skippedThisTick = 0;
 int currentTickId = -1;
 
 Optimizer& Optimizer::getInstance() {
@@ -19,17 +19,52 @@ Optimizer& Optimizer::getInstance() {
 }
 
 bool Optimizer::load() {
-    getSelf().getLogger().info("生物AI优化插件已加载");
+    getLogger().info("生物AI优化插件已加载");
     return true;
 }
 
+void Optimizer::loadConfig() {
+    auto configDir = getSelf().getConfigDir();           // 标准配置目录
+    ll::io::ensureDir(configDir);
+    auto configPath = configDir / "config.json";
+
+    // 不存在则生成默认配置
+    if (!std::filesystem::exists(configPath)) {
+        nlohmann::json j = {
+            {"cooldownTicks", config.cooldownTicks},
+            {"maxPerTick",    config.maxPerTick},
+            {"debug",         config.debug}
+        };
+        if (ll::io::writeFile(configPath, j.dump(4))) {
+            getLogger().info("已生成默认配置文件 → {}", configPath.string());
+        }
+    }
+
+    // 读取配置
+    try {
+        auto content = ll::io::readFile(configPath);
+        auto j = nlohmann::json::parse(content);
+
+        config.cooldownTicks = j.value("cooldownTicks", 5);
+        config.maxPerTick    = j.value("maxPerTick", 50);
+        config.debug         = j.value("debug", false);
+
+        getLogger().info("配置文件加载成功 | 冷却:{} tick | 每tick上限:{} | Debug: {}",
+            config.cooldownTicks, config.maxPerTick, config.debug ? "已开启" : "已关闭");
+    } catch (const std::exception& e) {
+        getLogger().error("配置文件读取失败: {}", e.what());
+        getLogger().info("使用默认配置");
+    }
+}
+
 bool Optimizer::enable() {
-    getSelf().getLogger().info("生物AI优化插件已启用");
+    loadConfig();                                     // 加载配置
+    getLogger().info("§a生物AI优化插件已启用");
     return true;
 }
 
 bool Optimizer::disable() {
-    getSelf().getLogger().info("生物AI优化插件已禁用");
+    getLogger().info("生物AI优化插件已禁用");
     return true;
 }
 
@@ -40,39 +75,48 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
     MobAiStepHook,
     ll::memory::HookPriority::Normal,
     Mob,
-    &Mob::$aiStep,      // 必须加 $，因为 aiStep 是虚函数
+    &Mob::$aiStep,
     void
 ) {
     using namespace mob_ai_optimizer;
+    auto& logger = Optimizer::getInstance().getLogger();
 
     auto* self = this;
-    auto& level = self->getLevel();
-    auto currentTick = level.getCurrentServerTick().tickID;
-    int tickInt = static_cast<int>(currentTick);
+    int tickInt = static_cast<int>(self->getLevel().getCurrentServerTick().tickID);
 
+    // 新的一 tick → 输出上一 tick 的优化统计
     if (tickInt != currentTickId) {
+        if (config.debug && (processedThisTick > 0 || skippedThisTick > 0)) {
+            logger.debug("§b[AI Optimizer] Tick {} | 处理:{} | 跳过:{} | 缓存:{} 个生物",
+                currentTickId, processedThisTick, skippedThisTick, lastAiTick.size());
+        }
         currentTickId = tickInt;
         processedThisTick = 0;
+        skippedThisTick = 0;
     }
 
     ActorUniqueID id = self->getOrCreateUniqueID();
 
+    // 冷却跳过
     auto it = lastAiTick.find(id);
-    if (it != lastAiTick.end() && tickInt - it->second < COOLDOWN_TICKS) {
-        return;  // 还在冷却期，跳过本次AI
+    if (it != lastAiTick.end() && tickInt - it->second < config.cooldownTicks) {
+        skippedThisTick++;
+        return;
     }
 
-    if (processedThisTick >= MAX_PER_TICK) {
-        return;  // 本tick已达上限
+    // 每tick上限跳过
+    if (processedThisTick >= config.maxPerTick) {
+        skippedThisTick++;
+        return;
     }
 
+    // 执行AI
     processedThisTick++;
     lastAiTick[id] = tickInt;
-    origin();    // 执行原始AI
+    origin();
 }
 
 // ====================== 自动清理 Hook ======================
-// 生物/实体被移除（despawn）时自动删除缓存，防止内存泄漏
 LL_AUTO_TYPE_INSTANCE_HOOK(
     ActorDespawnHook,
     ll::memory::HookPriority::Normal,
@@ -80,8 +124,7 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
     &Actor::$despawn,
     void
 ) {
-    using namespace mob_ai_optimizer;
-    lastAiTick.erase(this->getOrCreateUniqueID());
+    mob_ai_optimizer::lastAiTick.erase(this->getOrCreateUniqueID());
     origin();
 }
 
