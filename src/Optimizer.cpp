@@ -3,7 +3,8 @@
 #include <ll/api/service/Bedrock.h>
 #include <ll/api/mod/RegisterHelper.h>
 #include <ll/api/event/EventBus.h>
-#include <ll/api/event/actor/ActorRemovedEvent.h>   // 根据实际路径调整
+#include <mc/world/events/ActorRemovedEvent.h>   // 原生事件
+#include <mc/deps/ecs/WeakEntityRef.h>           // WeakEntityRef 定义
 #include <mc/world/actor/Mob.h>
 #include <mc/world/actor/Actor.h>
 #include <mc/world/level/Level.h>
@@ -27,13 +28,18 @@ bool Optimizer::load() {
 }
 
 bool Optimizer::enable() {
-    // 注册 ActorRemovedEvent 监听器，清理已移除实体的缓存
+    // 注册 ActorRemovedEvent 原生事件监听器，清理已移除实体的缓存
     auto& eventBus = ll::event::EventBus::getInstance();
-    mListener = eventBus.emplaceListener<ll::event::actor::ActorRemovedEvent>(
-        [](ll::event::actor::ActorRemovedEvent& ev) {
-            // 从事件中获取被移除的实体指针（API 可能为 getActor() 或 self()）
-            if (auto actor = ev.getActor()) {          // 假设事件提供 getActor()
-                lastAiTick.erase(actor->getOrCreateUniqueID());
+    mListener = eventBus.emplaceListener<ActorRemovedEvent>(
+        [](ActorRemovedEvent& ev) {
+            // 通过 WeakEntityRef::lock() 获取 EntityContext 的强引用
+            if (auto ctx = ev.mEntity.lock()) {   // ctx 为 StackRefResult<EntityContext>
+                // 解引用 ctx 获得 EntityContext 对象
+                EntityContext& entityCtx = *ctx;
+                // 尝试从 EntityContext 获取 Actor 指针
+                if (auto actor = Actor::tryGetFromEntity(entityCtx, false)) {
+                    lastAiTick.erase(actor->getOrCreateUniqueID());
+                }
             }
         }
     );
