@@ -6,7 +6,6 @@
 #include <mc/world/level/Level.h>
 #include <mc/world/level/Tick.h>
 #include <mc/legacy/ActorUniqueID.h>
-#include <atomic> // 添加 atomic 支持
 
 namespace mob_ai_optimizer {
 
@@ -16,8 +15,8 @@ constexpr int CLEANUP_INTERVAL_TICKS = 1000; // 每1000 ticks清理一次过期�
 constexpr int MAX_EXPIRED_AGE = 10000; // 过期阈值：如果lastAiTick距今>此值，视为过期
 
 std::unordered_map<ActorUniqueID, int> lastAiTick;
-std::atomic<int> processedThisTick{0};
-std::atomic<int> currentTickId{-1};
+int processedThisTick = 0;
+int currentTickId = -1;
 int cleanupCounter = 0; // 清理计数器
 
 Optimizer& Optimizer::getInstance() {
@@ -69,16 +68,13 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
     auto currentTick = level.getCurrentServerTick().tickID;
     int tickInt = static_cast<int>(currentTick);
 
-    // 原子操作检查和更新currentTickId
-    int expectedTick = currentTickId.load(std::memory_order_relaxed);
-    if (tickInt != expectedTick) {
-        if (currentTickId.compare_exchange_strong(expectedTick, tickInt, std::memory_order_relaxed)) {
-            processedThisTick.store(0, std::memory_order_relaxed);
-            cleanupCounter++;
-            if (cleanupCounter >= CLEANUP_INTERVAL_TICKS) {
-                performCleanup(tickInt);
-                cleanupCounter = 0;
-            }
+    if (tickInt != currentTickId) {
+        currentTickId = tickInt;
+        processedThisTick = 0;
+        cleanupCounter++;
+        if (cleanupCounter >= CLEANUP_INTERVAL_TICKS) {
+            performCleanup(tickInt);
+            cleanupCounter = 0;
         }
     }
 
@@ -87,14 +83,10 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
     if (it != lastAiTick.end() && tickInt - it->second < COOLDOWN_TICKS) {
         return; // 还在冷却期，跳过本次AI
     }
-    // 原子递增processedThisTick
-    int currentProcessed = processedThisTick.load(std::memory_order_relaxed);
-    if (currentProcessed >= MAX_PER_TICK) {
+    if (processedThisTick >= MAX_PER_TICK) {
         return; // 本tick已达上限
     }
-    if (!processedThisTick.compare_exchange_strong(currentProcessed, currentProcessed + 1, std::memory_order_relaxed)) {
-        return; // 如果竞争失败（虽单线程，但安全起见）
-    }
+    processedThisTick++;
 
     lastAiTick[id] = tickInt;
     origin(); // 执行原始AI
@@ -115,12 +107,12 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
 }
 
 // ====================== 额外钩子：Actor移除钩子 ======================
-// 钩住Actor::_onRemove 以捕获更多移除场景（e.g., kill, explosion）
+// 钩住Actor::remove 以捕获更多移除场景（e.g., kill, explosion）
 LL_AUTO_TYPE_INSTANCE_HOOK(
-    ActorOnRemoveHook,
+    ActorRemoveHook,
     ll::memory::HookPriority::Normal,
     Actor,
-    &Actor::_onRemove,
+    &Actor::$remove,
     void
 ) {
     using namespace mob_ai_optimizer;
