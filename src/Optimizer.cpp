@@ -9,16 +9,15 @@
 
 namespace mob_ai_optimizer {
 
-// ============================ 配置项（可自行调整） ============================
-constexpr size_t INITIAL_MAP_RESERVE   = 12000;   // 预分配 map 大小，避免频繁 rehash
-constexpr int   CLEANUP_INTERVAL_TICKS = 1200;    // 每 1200 ticks 执行一次过期清理
-constexpr int   MAX_EXPIRED_AGE        = 12000;   // 超过此 tick 数未更新的条目视为过期
+// 配置常量（可调整）
+constexpr size_t INITIAL_MAP_RESERVE = 10000; // 预分配大小，基于预期Mob数量
+constexpr int CLEANUP_INTERVAL_TICKS = 1000; // 每1000 ticks清理一次过期条目
+constexpr int MAX_EXPIRED_AGE = 10000; // 过期阈值：如果lastAiTick距今>此值，视为过期
 
-// 全局变量（在 Optimizer.h 中用 extern 声明）
 std::unordered_map<ActorUniqueID, int> lastAiTick;
 int processedThisTick = 0;
-int currentTickId     = -1;
-int cleanupCounter    = 0;
+int currentTickId = -1;
+int cleanupCounter = 0; // 清理计数器
 
 Optimizer& Optimizer::getInstance() {
     static Optimizer instance;
@@ -26,24 +25,24 @@ Optimizer& Optimizer::getInstance() {
 }
 
 bool Optimizer::load() {
-    getSelf().getLogger().info("§a生物AI优化插件已加载");
-    lastAiTick.reserve(INITIAL_MAP_RESERVE);
+    getSelf().getLogger().info("生物AI优化插件已加载");
+    lastAiTick.reserve(INITIAL_MAP_RESERVE); // 预分配减少rehash
     return true;
 }
 
 bool Optimizer::enable() {
-    getSelf().getLogger().info("§a生物AI优化插件已启用");
+    getSelf().getLogger().info("生物AI优化插件已启用");
     return true;
 }
 
 bool Optimizer::disable() {
-    getSelf().getLogger().info("§c生物AI优化插件已禁用");
-    lastAiTick.clear();
+    getSelf().getLogger().info("生物AI优化插件已禁用");
+    lastAiTick.clear(); // 禁用时清理map
     return true;
 }
 
-// 定期清理过期条目（防止内存泄漏）
 void performCleanup(int currentTick) {
+    // 清理过期条目，防止泄漏
     for (auto it = lastAiTick.begin(); it != lastAiTick.end(); ) {
         if (currentTick - it->second > MAX_EXPIRED_AGE) {
             it = lastAiTick.erase(it);
@@ -55,51 +54,46 @@ void performCleanup(int currentTick) {
 
 } // namespace mob_ai_optimizer
 
-// ====================== AI优化核心 Hook ======================
+// ====================== AI优化 Hook ======================
 LL_AUTO_TYPE_INSTANCE_HOOK(
     MobAiStepHook,
     ll::memory::HookPriority::Normal,
     Mob,
-    &Mob::$aiStep,
+    &Mob::$aiStep, // 必须加 $，因为 aiStep 是虚函数
     void
 ) {
     using namespace mob_ai_optimizer;
+    auto* self = this;
+    auto& level = self->getLevel();
+    auto currentTick = level.getCurrentServerTick().tickID;
+    int tickInt = static_cast<int>(currentTick);
 
-    auto& level  = this->getLevel();
-    int   tickInt = static_cast<int>(level.getCurrentServerTick().tickID);
-
-    // Tick 切换时重置计数器和执行清理
     if (tickInt != currentTickId) {
-        currentTickId     = tickInt;
+        currentTickId = tickInt;
         processedThisTick = 0;
         cleanupCounter++;
-
         if (cleanupCounter >= CLEANUP_INTERVAL_TICKS) {
             performCleanup(tickInt);
             cleanupCounter = 0;
         }
     }
 
-    ActorUniqueID id = this->getOrCreateUniqueID();
-
-    // 冷却期跳过
+    ActorUniqueID id = self->getOrCreateUniqueID();
     auto it = lastAiTick.find(id);
     if (it != lastAiTick.end() && tickInt - it->second < COOLDOWN_TICKS) {
-        return;
+        return; // 还在冷却期，跳过本次AI
     }
-
-    // 本 tick 处理上限
     if (processedThisTick >= MAX_PER_TICK) {
-        return;
+        return; // 本tick已达上限
     }
-
     processedThisTick++;
-    lastAiTick[id] = tickInt;   // 记录本次处理时间
 
-    origin(); // 执行原始 aiStep
+    lastAiTick[id] = tickInt;
+    origin(); // 执行原始AI
 }
 
-// ====================== 实体移除清理 Hook ======================
+// ====================== 自动清理 Hook ======================
+// 生物/实体被移除（despawn）时自动删除缓存，防止内存泄漏
 LL_AUTO_TYPE_INSTANCE_HOOK(
     ActorDespawnHook,
     ll::memory::HookPriority::Normal,
@@ -112,6 +106,8 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
     origin();
 }
 
+// ====================== 额外钩子：Actor移除钩子 ======================
+// 钩住Actor::remove 以捕获更多移除场景（e.g., kill, explosion）
 LL_AUTO_TYPE_INSTANCE_HOOK(
     ActorRemoveHook,
     ll::memory::HookPriority::Normal,
