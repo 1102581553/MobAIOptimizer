@@ -20,7 +20,6 @@ public:
 
 private:
     ll::mod::NativeMod& mSelf;
-    class ActorEventListener* mListener;  // Changed to ActorEventListener*
 };
 
 // 全局数据
