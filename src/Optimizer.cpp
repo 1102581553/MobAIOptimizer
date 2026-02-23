@@ -12,28 +12,12 @@
 
 namespace mob_ai_optimizer {
 
-// 配置常量（若 Optimizer.h 未定义，则在此定义默认值）
-#ifndef COOLDOWN_TICKS
-#define COOLDOWN_TICKS 20        // 两次AI执行的最小间隔 tick 数
-#endif
-#ifndef MAX_PER_TICK
-#define MAX_PER_TICK 10          // 每 tick 最多处理的生物数
-#endif
-#ifndef INITIAL_MAP_RESERVE
-#define INITIAL_MAP_RESERVE 10000 // 预分配大小
-#endif
-#ifndef CLEANUP_INTERVAL_TICKS
-#define CLEANUP_INTERVAL_TICKS 1000 // 每 1000 ticks 清理过期条目
-#endif
-#ifndef MAX_EXPIRED_AGE
-#define MAX_EXPIRED_AGE 10000     // 过期阈值
-#endif
-
-std::unordered_map<ActorUniqueID, uint64_t> lastAiTick; // 改为 uint64_t 存储 tick
-std::mutex lastAiTickMutex;                              // 保护 lastAiTick 的互斥锁
-std::atomic<int> processedThisTick{0};                   // 本 tick 已处理计数
-std::atomic<uint64_t> currentTickId{0};                  // 当前 tick ID
-int cleanupCounter = 0;                                   // 清理计数器
+// 定义全局变量（与头文件声明一致）
+std::unordered_map<ActorUniqueID, std::uint64_t> lastAiTick;
+std::mutex lastAiTickMutex;
+std::atomic<int> processedThisTick{0};
+std::atomic<std::uint64_t> currentTickId{0};
+int cleanupCounter = 0;
 
 Optimizer& Optimizer::getInstance() {
     static Optimizer instance;
@@ -44,7 +28,7 @@ bool Optimizer::load() {
     getSelf().getLogger().info("生物AI优化插件已加载");
     {
         std::lock_guard<std::mutex> lock(lastAiTickMutex);
-        lastAiTick.reserve(INITIAL_MAP_RESERVE); // 预分配减少 rehash
+        lastAiTick.reserve(INITIAL_MAP_RESERVE); // 使用头文件常量
     }
     return true;
 }
@@ -58,14 +42,13 @@ bool Optimizer::disable() {
     getSelf().getLogger().info("生物AI优化插件已禁用");
     {
         std::lock_guard<std::mutex> lock(lastAiTickMutex);
-        lastAiTick.clear(); // 禁用时清理 map
+        lastAiTick.clear();
     }
     return true;
 }
 
-void performCleanup(uint64_t currentTick) {
+void performCleanup(std::uint64_t currentTick) {
     std::lock_guard<std::mutex> lock(lastAiTickMutex);
-    // 清理过期条目，防止泄漏
     for (auto it = lastAiTick.begin(); it != lastAiTick.end(); ) {
         if (currentTick - it->second > MAX_EXPIRED_AGE) {
             it = lastAiTick.erase(it);
@@ -82,18 +65,13 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
     MobAiStepHook,
     ll::memory::HookPriority::Normal,
     Mob,
-    &Mob::$aiStep, // 必须加 $，因为 aiStep 是虚函数
+    &Mob::$aiStep,
     void
 ) {
     using namespace mob_ai_optimizer;
 
-    // 获取当前 tick ID（安全转换）
-    auto& level = this->getLevel();
-    if (!level.has_value()) { // 检查 level 是否有效
-        origin();
-        return;
-    }
-    uint64_t currentTick = level->getCurrentServerTick().tickID;
+    // 直接获取当前 tick（getLevel() 返回引用，无需检查）
+    std::uint64_t currentTick = this->getLevel().getCurrentServerTick().tickID;
 
     // 跨 tick 重置计数
     if (currentTick != currentTickId.load()) {
@@ -112,23 +90,22 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
         std::lock_guard<std::mutex> lock(lastAiTickMutex);
         auto it = lastAiTick.find(id);
         if (it != lastAiTick.end() && currentTick - it->second < COOLDOWN_TICKS) {
-            return; // 还在冷却期，跳过本次 AI
+            return; // 还在冷却期，跳过本次 AI（不调用 origin）
         }
     }
 
     int processed = processedThisTick.load();
     if (processed >= MAX_PER_TICK) {
-        return; // 本 tick 已达上限
+        return; // 本 tick 已达上限，跳过
     }
 
     // 尝试原子递增，防止并发超限
     if (!processedThisTick.compare_exchange_strong(processed, processed + 1)) {
-        // 如果交换失败，说明其他线程已修改，重新判断
         if (processed >= MAX_PER_TICK) return;
         processedThisTick.fetch_add(1);
     }
 
-    // 执行原始 AI（可能抛出异常，但异常不可恢复，故不额外处理）
+    // 执行原始 AI
     origin();
 
     // AI 成功执行后，更新最后执行 tick
@@ -139,7 +116,6 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
 }
 
 // ====================== 自动清理 Hook ======================
-// 生物/实体被移除（despawn）时自动删除缓存，防止内存泄漏
 LL_AUTO_TYPE_INSTANCE_HOOK(
     ActorDespawnHook,
     ll::memory::HookPriority::Normal,
@@ -148,7 +124,6 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
     void
 ) {
     using namespace mob_ai_optimizer;
-    // 先删除缓存，再调用原函数，确保无论原函数成功与否，缓存都被清理
     {
         std::lock_guard<std::mutex> lock(lastAiTickMutex);
         lastAiTick.erase(this->getOrCreateUniqueID());
@@ -156,8 +131,6 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
     origin();
 }
 
-// ====================== 额外钩子：Actor移除钩子 ======================
-// 钩住 Actor::remove 以捕获更多移除场景（e.g., kill, explosion）
 LL_AUTO_TYPE_INSTANCE_HOOK(
     ActorRemoveHook,
     ll::memory::HookPriority::Normal,
