@@ -5,9 +5,9 @@
 #include <unordered_map>
 #include <atomic>
 #include <cstdint>
-#include <mutex>      // 新增：用于 std::mutex
-#include <vector>     // 新增：用于 std::vector
-#include <future>     // 新增：用于 std::future
+#include <mutex>
+#include <vector>
+#include <future>
 
 namespace mob_ai_optimizer {
 
@@ -27,17 +27,17 @@ private:
     ll::mod::NativeMod& mSelf;
 };
 
-// 全局数据声明（与源文件定义类型严格一致）
+// 全局数据声明
 extern std::unordered_map<ActorUniqueID, std::uint64_t> lastAiTick;
-extern std::mutex lastAiTickMutex;                     // 新增
+extern std::mutex lastAiTickMutex;
 extern std::atomic<int> processedThisTick;
 extern std::atomic<std::uint64_t> currentTickId;
-extern std::atomic<int> cleanupCounter;                 // 新增（原子类型）
+extern std::atomic<int> cleanupCounter;
 
-// 异步任务管理相关声明
-extern std::vector<std::future<void>> cleanupTasks;     // 新增
-extern std::mutex cleanupTasksMutex;                    // 新增
-extern std::atomic<bool> stopping;                       // 新增
+// 异步任务管理
+extern std::vector<std::future<void>> cleanupTasks;
+extern std::mutex cleanupTasksMutex;
+extern std::atomic<bool> stopping;
 
 // 配置常量
 constexpr int COOLDOWN_TICKS = 100;
