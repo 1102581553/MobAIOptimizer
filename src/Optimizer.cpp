@@ -3,25 +3,96 @@
 #include <ll/api/mod/RegisterHelper.h>
 #include <ll/api/io/Logger.h>
 #include <ll/api/io/LoggerRegistry.h>
+#include <ll/api/chrono/GameChrono.h>
+#include <ll/api/coro/CoroTask.h>
+#include <ll/api/thread/ServerThreadExecutor.h>
 #include <mc/world/actor/Mob.h>
 #include <mc/world/actor/Actor.h>
 #include <mc/world/level/Level.h>
 #include <mc/world/level/Tick.h>
 #include <mc/legacy/ActorUniqueID.h>
+#include <filesystem>
 
 namespace mob_ai_optimizer {
 
-// ====================== 全局变量定义 ======================
+// ====================== 全局变量 ======================
+static Config config;
+static std::shared_ptr<ll::io::Logger> log;
+static bool debugTaskRunning = false;
+
 std::unordered_map<ActorUniqueID, std::uint64_t> lastAiTick;
 int processedThisTick = 0;
 std::uint64_t lastTickId = 0;
 int cleanupCounter = 0;
 
+// 调试统计
+static size_t totalProcessed = 0;
+static size_t totalCooldownSkipped = 0;
+static size_t totalThrottleSkipped = 0;
+static size_t totalDespawnCleaned = 0;
+static size_t totalExpiredCleaned = 0;
+
 // ====================== Logger ======================
-ll::io::Logger& getLogger() {
-    static auto instance = ll::io::LoggerRegistry::getInstance()
-                              .getOrCreate("MobAIOptimizer");
-    return *instance;
+static ll::io::Logger& getLogger() {
+    if (!log) {
+        log = ll::io::LoggerRegistry::getInstance().getOrCreate("MobAIOptimizer");
+    }
+    return *log;
+}
+
+// ====================== Config ======================
+Config& getConfig() { return config; }
+
+bool loadConfig() {
+    auto path = Optimizer::getInstance().getSelf().getConfigDir() / "config.json";
+    bool loaded = ll::config::loadConfig(config, path);
+    if (config.cooldownTicks < 0) config.cooldownTicks = 1;
+    if (config.maxPerTick < 1) config.maxPerTick = 1;
+    if (config.cleanupIntervalTicks < 1) config.cleanupIntervalTicks = 100;
+    if (config.maxExpiredAge < 1) config.maxExpiredAge = 600;
+    if (config.initialMapReserve == 0) config.initialMapReserve = 1000;
+    return loaded;
+}
+
+bool saveConfig() {
+    auto path = Optimizer::getInstance().getSelf().getConfigDir() / "config.json";
+    return ll::config::saveConfig(config, path);
+}
+
+// ====================== Debug ======================
+static void resetStats() {
+    totalProcessed = totalCooldownSkipped = totalThrottleSkipped = 0;
+    totalDespawnCleaned = totalExpiredCleaned = 0;
+}
+
+static void startDebugTask() {
+    if (debugTaskRunning) return;
+    debugTaskRunning = true;
+
+    ll::coro::keepThis([]() -> ll::coro::CoroTask<> {
+        while (debugTaskRunning) {
+            co_await std::chrono::seconds(5);
+            ll::thread::ServerThreadExecutor::getDefault().execute([] {
+                if (!config.debug) return;
+                size_t total = totalProcessed + totalCooldownSkipped + totalThrottleSkipped;
+                double skipRate = total > 0
+                    ? (100.0 * (totalCooldownSkipped + totalThrottleSkipped) / total) : 0.0;
+                getLogger().info(
+                    "AI stats (5s): processed={}, cooldownSkip={}, throttleSkip={}, "
+                    "skipRate={:.1f}%, despawnClean={}, expiredClean={}, tracked={}",
+                    totalProcessed, totalCooldownSkipped, totalThrottleSkipped,
+                    skipRate, totalDespawnCleaned, totalExpiredCleaned,
+                    lastAiTick.size()
+                );
+                resetStats();
+            });
+        }
+        debugTaskRunning = false;
+    }).launch(ll::thread::ServerThreadExecutor::getDefault());
+}
+
+static void stopDebugTask() {
+    debugTaskRunning = false;
 }
 
 // ====================== 插件生命周期 ======================
@@ -31,22 +102,33 @@ Optimizer& Optimizer::getInstance() {
 }
 
 bool Optimizer::load() {
-    getLogger().info("生物AI优化插件已加载");
-    lastAiTick.reserve(INITIAL_MAP_RESERVE);
+    std::filesystem::create_directories(getSelf().getConfigDir());
+    if (!loadConfig()) {
+        getLogger().warn("Failed to load config, using defaults and saving");
+        saveConfig();
+    }
+    lastAiTick.reserve(config.initialMapReserve);
+    getLogger().info(
+        "MobAIOptimizer loaded. enabled: {}, debug: {}, cooldown: {}, maxPerTick: {}",
+        config.enabled, config.debug, config.cooldownTicks, config.maxPerTick
+    );
     return true;
 }
 
 bool Optimizer::enable() {
-    getLogger().info("生物AI优化插件已启用");
+    if (config.debug) startDebugTask();
+    getLogger().info("MobAIOptimizer enabled");
     return true;
 }
 
 bool Optimizer::disable() {
-    getLogger().info("生物AI优化插件已禁用");
+    stopDebugTask();
     lastAiTick.clear();
     processedThisTick = 0;
     lastTickId = 0;
     cleanupCounter = 0;
+    resetStats();
+    getLogger().info("MobAIOptimizer disabled");
     return true;
 }
 
@@ -62,34 +144,48 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
 ) {
     using namespace mob_ai_optimizer;
 
+    if (!config.enabled) {
+        origin();
+        return;
+    }
+
     std::uint64_t currentTick = this->getLevel().getCurrentServerTick().tickID;
 
-    // tick 重置：新的一 tick 开始时重置计数器，并按间隔执行清理
+    // tick 重置
     if (currentTick != lastTickId) {
         lastTickId = currentTick;
         processedThisTick = 0;
 
-        if (++cleanupCounter >= CLEANUP_INTERVAL_TICKS) {
+        if (++cleanupCounter >= config.cleanupIntervalTicks) {
             cleanupCounter = 0;
             for (auto it = lastAiTick.begin(); it != lastAiTick.end(); ) {
-                if (currentTick - it->second > MAX_EXPIRED_AGE)
+                if (currentTick - it->second > static_cast<std::uint64_t>(config.maxExpiredAge)) {
                     it = lastAiTick.erase(it);
-                else
+                    ++totalExpiredCleaned;
+                } else {
                     ++it;
+                }
             }
         }
     }
 
-    // 每 tick 限流：达到上限后直接跳过，连哈希查找都不做
-    if (processedThisTick >= MAX_PER_TICK) return;
+    // 每 tick 限流
+    if (processedThisTick >= config.maxPerTick) {
+        ++totalThrottleSkipped;
+        return;
+    }
 
     // 冷却检查 + 写回合并为一次哈希查找
     auto [it, inserted] = lastAiTick.emplace(this->getOrCreateUniqueID(), 0);
-    if (!inserted && currentTick - it->second < COOLDOWN_TICKS) return;
+    if (!inserted && currentTick - it->second < static_cast<std::uint64_t>(config.cooldownTicks)) {
+        ++totalCooldownSkipped;
+        return;
+    }
 
     ++processedThisTick;
     origin();
     it->second = currentTick;
+    ++totalProcessed;
 }
 
 // ====================== 自动清理 Hook ======================
@@ -100,7 +196,11 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
     &Actor::$despawn,
     void
 ) {
-    mob_ai_optimizer::lastAiTick.erase(this->getOrCreateUniqueID());
+    using namespace mob_ai_optimizer;
+    if (config.enabled) {
+        lastAiTick.erase(this->getOrCreateUniqueID());
+        ++totalDespawnCleaned;
+    }
     origin();
 }
 
@@ -111,7 +211,11 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
     &Actor::$remove,
     void
 ) {
-    mob_ai_optimizer::lastAiTick.erase(this->getOrCreateUniqueID());
+    using namespace mob_ai_optimizer;
+    if (config.enabled) {
+        lastAiTick.erase(this->getOrCreateUniqueID());
+        ++totalDespawnCleaned;
+    }
     origin();
 }
 
