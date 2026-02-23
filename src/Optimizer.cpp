@@ -6,18 +6,34 @@
 #include <mc/world/level/Level.h>
 #include <mc/world/level/Tick.h>
 #include <mc/legacy/ActorUniqueID.h>
+#include <unordered_map>
+#include <mutex>
+#include <atomic>
 
 namespace mob_ai_optimizer {
 
-// 配置常量（可调整）
-constexpr size_t INITIAL_MAP_RESERVE = 10000; // 预分配大小，基于预期Mob数量
-constexpr int CLEANUP_INTERVAL_TICKS = 1000; // 每1000 ticks清理一次过期条目
-constexpr int MAX_EXPIRED_AGE = 10000; // 过期阈值：如果lastAiTick距今>此值，视为过期
+// 配置常量（若 Optimizer.h 未定义，则在此定义默认值）
+#ifndef COOLDOWN_TICKS
+#define COOLDOWN_TICKS 20        // 两次AI执行的最小间隔 tick 数
+#endif
+#ifndef MAX_PER_TICK
+#define MAX_PER_TICK 10          // 每 tick 最多处理的生物数
+#endif
+#ifndef INITIAL_MAP_RESERVE
+#define INITIAL_MAP_RESERVE 10000 // 预分配大小
+#endif
+#ifndef CLEANUP_INTERVAL_TICKS
+#define CLEANUP_INTERVAL_TICKS 1000 // 每 1000 ticks 清理过期条目
+#endif
+#ifndef MAX_EXPIRED_AGE
+#define MAX_EXPIRED_AGE 10000     // 过期阈值
+#endif
 
-std::unordered_map<ActorUniqueID, int> lastAiTick;
-int processedThisTick = 0;
-int currentTickId = -1;
-int cleanupCounter = 0; // 清理计数器
+std::unordered_map<ActorUniqueID, uint64_t> lastAiTick; // 改为 uint64_t 存储 tick
+std::mutex lastAiTickMutex;                              // 保护 lastAiTick 的互斥锁
+std::atomic<int> processedThisTick{0};                   // 本 tick 已处理计数
+std::atomic<uint64_t> currentTickId{0};                  // 当前 tick ID
+int cleanupCounter = 0;                                   // 清理计数器
 
 Optimizer& Optimizer::getInstance() {
     static Optimizer instance;
@@ -26,7 +42,10 @@ Optimizer& Optimizer::getInstance() {
 
 bool Optimizer::load() {
     getSelf().getLogger().info("生物AI优化插件已加载");
-    lastAiTick.reserve(INITIAL_MAP_RESERVE); // 预分配减少rehash
+    {
+        std::lock_guard<std::mutex> lock(lastAiTickMutex);
+        lastAiTick.reserve(INITIAL_MAP_RESERVE); // 预分配减少 rehash
+    }
     return true;
 }
 
@@ -37,11 +56,15 @@ bool Optimizer::enable() {
 
 bool Optimizer::disable() {
     getSelf().getLogger().info("生物AI优化插件已禁用");
-    lastAiTick.clear(); // 禁用时清理map
+    {
+        std::lock_guard<std::mutex> lock(lastAiTickMutex);
+        lastAiTick.clear(); // 禁用时清理 map
+    }
     return true;
 }
 
-void performCleanup(int currentTick) {
+void performCleanup(uint64_t currentTick) {
+    std::lock_guard<std::mutex> lock(lastAiTickMutex);
     // 清理过期条目，防止泄漏
     for (auto it = lastAiTick.begin(); it != lastAiTick.end(); ) {
         if (currentTick - it->second > MAX_EXPIRED_AGE) {
@@ -63,33 +86,56 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
     void
 ) {
     using namespace mob_ai_optimizer;
-    auto* self = this;
-    auto& level = self->getLevel();
-    auto currentTick = level.getCurrentServerTick().tickID;
-    int tickInt = static_cast<int>(currentTick);
 
-    if (tickInt != currentTickId) {
-        currentTickId = tickInt;
-        processedThisTick = 0;
+    // 获取当前 tick ID（安全转换）
+    auto& level = this->getLevel();
+    if (!level.has_value()) { // 检查 level 是否有效
+        origin();
+        return;
+    }
+    uint64_t currentTick = level->getCurrentServerTick().tickID;
+
+    // 跨 tick 重置计数
+    if (currentTick != currentTickId.load()) {
+        currentTickId.store(currentTick);
+        processedThisTick.store(0);
         cleanupCounter++;
         if (cleanupCounter >= CLEANUP_INTERVAL_TICKS) {
-            performCleanup(tickInt);
+            performCleanup(currentTick);
             cleanupCounter = 0;
         }
     }
 
-    ActorUniqueID id = self->getOrCreateUniqueID();
-    auto it = lastAiTick.find(id);
-    if (it != lastAiTick.end() && tickInt - it->second < COOLDOWN_TICKS) {
-        return; // 还在冷却期，跳过本次AI
+    // 检查冷却与每 tick 上限
+    ActorUniqueID id = this->getOrCreateUniqueID();
+    {
+        std::lock_guard<std::mutex> lock(lastAiTickMutex);
+        auto it = lastAiTick.find(id);
+        if (it != lastAiTick.end() && currentTick - it->second < COOLDOWN_TICKS) {
+            return; // 还在冷却期，跳过本次 AI
+        }
     }
-    if (processedThisTick >= MAX_PER_TICK) {
-        return; // 本tick已达上限
-    }
-    processedThisTick++;
 
-    lastAiTick[id] = tickInt;
-    origin(); // 执行原始AI
+    int processed = processedThisTick.load();
+    if (processed >= MAX_PER_TICK) {
+        return; // 本 tick 已达上限
+    }
+
+    // 尝试原子递增，防止并发超限
+    if (!processedThisTick.compare_exchange_strong(processed, processed + 1)) {
+        // 如果交换失败，说明其他线程已修改，重新判断
+        if (processed >= MAX_PER_TICK) return;
+        processedThisTick.fetch_add(1);
+    }
+
+    // 执行原始 AI（可能抛出异常，但异常不可恢复，故不额外处理）
+    origin();
+
+    // AI 成功执行后，更新最后执行 tick
+    {
+        std::lock_guard<std::mutex> lock(lastAiTickMutex);
+        lastAiTick[id] = currentTick;
+    }
 }
 
 // ====================== 自动清理 Hook ======================
@@ -102,12 +148,16 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
     void
 ) {
     using namespace mob_ai_optimizer;
-    lastAiTick.erase(this->getOrCreateUniqueID());
+    // 先删除缓存，再调用原函数，确保无论原函数成功与否，缓存都被清理
+    {
+        std::lock_guard<std::mutex> lock(lastAiTickMutex);
+        lastAiTick.erase(this->getOrCreateUniqueID());
+    }
     origin();
 }
 
 // ====================== 额外钩子：Actor移除钩子 ======================
-// 钩住Actor::remove 以捕获更多移除场景（e.g., kill, explosion）
+// 钩住 Actor::remove 以捕获更多移除场景（e.g., kill, explosion）
 LL_AUTO_TYPE_INSTANCE_HOOK(
     ActorRemoveHook,
     ll::memory::HookPriority::Normal,
@@ -116,7 +166,10 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
     void
 ) {
     using namespace mob_ai_optimizer;
-    lastAiTick.erase(this->getOrCreateUniqueID());
+    {
+        std::lock_guard<std::mutex> lock(lastAiTickMutex);
+        lastAiTick.erase(this->getOrCreateUniqueID());
+    }
     origin();
 }
 
