@@ -50,11 +50,11 @@ constexpr int COOLDOWN_TICKS = 300;
 
 //  每 tick 最大处理生物数 - 控制单帧 CPU 峰值
 
-constexpr int MAX_PER_TICK = 4;
+constexpr int MAX_PER_TICK = 1;
 
 //  清理任务间隔（tick）- 值越小，过期记录清理越及时，内存越稳定
 
-constexpr int CLEANUP_INTERVAL_TICKS = 200;
+constexpr int CLEANUP_INTERVAL_TICKS = 1200;
 
 //  记录最大存活时间（tick）- 控制 unordered_map 最大尺寸
 constexpr int MAX_EXPIRED_AGE = 2400;
