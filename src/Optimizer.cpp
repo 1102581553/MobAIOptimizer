@@ -13,10 +13,11 @@
 #include <atomic>
 #include <future>
 #include <chrono>
+#include <algorithm>  // ← 新增：用于 std::remove_if
 
 namespace mob_ai_optimizer {
 
-// 全局变量定义
+// ====================== 全局变量定义 ======================
 std::unordered_map<ActorUniqueID, std::uint64_t> lastAiTick;
 std::mutex lastAiTickMutex;
 std::atomic<int> processedThisTick{0};
@@ -27,19 +28,37 @@ std::vector<std::future<void>> cleanupTasks;
 std::mutex cleanupTasksMutex;
 std::atomic<bool> stopping{false};
 
-// Logger 获取（模仿 RedstoneOptimizer 模式）
+// Logger 获取（线程安全初始化）
 static std::shared_ptr<ll::io::Logger> logger;
 
 ll::io::Logger& getLogger() {
-    if (!logger) {
-        logger = ll::io::LoggerRegistry::getInstance().getOrCreate("MobAIOptimizer");
-    }
-    return *logger;
+    static std::once_flag flag;
+    static std::shared_ptr<ll::io::Logger> instance;
+    std::call_once(flag, []{
+        instance = ll::io::LoggerRegistry::getInstance()
+                      .getOrCreate("MobAIOptimizer");
+    });
+    return *instance;
+}
+
+// ====================== 辅助函数：清理已完成的 future ======================
+// ⚠️ 调用前必须持有 cleanupTasksMutex 锁
+inline void pruneCompletedFutures() {
+    cleanupTasks.erase(
+        std::remove_if(cleanupTasks.begin(), cleanupTasks.end(),
+            [](std::future<void>& fut) {
+                // wait_for(0) 非阻塞检查任务是否完成
+                return fut.valid() && 
+                       fut.wait_for(std::chrono::seconds(0)) 
+                           == std::future_status::ready;
+            }),
+        cleanupTasks.end()
+    );
 }
 
 // ====================== 异步清理函数 ======================
 void performCleanupAsync(std::uint64_t currentTick) {
-    if (stopping.load()) return;   // 插件正在卸载，不再启动新任务
+    if (stopping.load()) return;
 
     auto fut = std::async(std::launch::async, [currentTick] {
         try {
@@ -60,6 +79,8 @@ void performCleanupAsync(std::uint64_t currentTick) {
 
     {
         std::lock_guard<std::mutex> lock(cleanupTasksMutex);
+        // ✨ 修复：添加前先清理已完成的任务，防止 vector 无限增长
+        pruneCompletedFutures();
         cleanupTasks.push_back(std::move(fut));
     }
 }
@@ -92,12 +113,13 @@ bool Optimizer::disable() {
     // 等待所有后台清理任务完成
     {
         std::lock_guard<std::mutex> lock(cleanupTasksMutex);
+        // ✨ 修复：先等待所有 future 完成，再清理 vector
         for (auto& fut : cleanupTasks) {
             if (fut.valid()) {
-                fut.wait();
+                fut.wait();  // 阻塞直到任务完成
             }
         }
-        cleanupTasks.clear();
+        cleanupTasks.clear();  // 清空已完成的 future
     }
 
     {
@@ -135,10 +157,17 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
                                               std::memory_order_release,
                                               std::memory_order_relaxed)) {
         processedThisTick.store(0, std::memory_order_relaxed);
+        
         int oldCleanup = ++cleanupCounter;
         if (oldCleanup >= CLEANUP_INTERVAL_TICKS) {
             performCleanupAsync(currentTick);
             cleanupCounter = 0;
+        }
+        
+        // ✨ 优化：tick 重置时也顺便清理已完成的 future（低频开销）
+        {
+            std::lock_guard<std::mutex> lock(cleanupTasksMutex);
+            pruneCompletedFutures();
         }
     }
 
