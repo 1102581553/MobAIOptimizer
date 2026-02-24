@@ -43,15 +43,26 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
     if (currentTick != lastTickId) {
         lastTickId        = currentTick;
         processedThisTick = 0;
-
-        constexpr std::uint64_t kExpiry = 60;
-        for (auto it = lastAiTick.begin(); it != lastAiTick.end(); ) {
-            if (currentTick - it->second > kExpiry)
-                it = lastAiTick.erase(it);
-            else
-                ++it;
+    
+        // 每秒清理一次，避免每 tick O(N)
+        if (currentTick % 20 == 0) {
+    
+            // 过期时间必须 >= cooldownTicks
+            const std::uint64_t kExpiry =
+                std::max<std::uint64_t>(
+                    static_cast<std::uint64_t>(config.cooldownTicks) * 2,
+                    60ULL
+                );
+    
+            for (auto it = lastAiTick.begin(); it != lastAiTick.end(); ) {
+                if (currentTick - it->second > kExpiry)
+                    it = lastAiTick.erase(it);
+                else
+                    ++it;
+            }
         }
     }
+
 
     if (processedThisTick >= config.maxPerTick) {
         ++gStats.totalThrottleSkipped;
