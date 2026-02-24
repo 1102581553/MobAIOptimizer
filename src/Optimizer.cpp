@@ -7,6 +7,8 @@
 #include "mc/world/level/BlockSource.h"
 #include "mc/world/level/Level.h"
 #include "mc/world/level/Tick.h"
+#include "mc/entity/components_json_legacy/PushableComponent.h"
+#include "mc/deps/core/math/Vec3.h"
 
 #include <filesystem>
 #include <unordered_map>
@@ -15,8 +17,8 @@ namespace mob_ai_optimizer {
 
 // ── 每个实体的状态 ────────────────────────────────────────
 struct ActorState {
-    std::uint64_t lastAiTick   = 0; // 上次实际执行 AI 的 tick
-    std::uint64_t pendingSince = 0; // 开始被 throttle 的 tick，0 = 未在等待
+    std::uint64_t lastAiTick   = 0;
+    std::uint64_t pendingSince = 0;
 };
 
 // ── 全局状态 ──────────────────────────────────────────────
@@ -31,6 +33,7 @@ static std::uint64_t lastDebugTick   = 0;
 static std::uint64_t lastCleanupTick = 0;
 
 static std::unordered_map<std::int64_t, ActorState> actorStates;
+static std::unordered_map<Actor*, int>               pushedEntityTimes;
 
 // ─────────────────────────────────────────────────────────
 
@@ -46,7 +49,7 @@ ll::io::Logger& logger() {
 Stats getStats()   { return gStats; }
 void  resetStats() { gStats = {}; }
 
-// ── Hook ──────────────────────────────────────────────────
+// ── ActorTick Hook ────────────────────────────────────────
 LL_TYPE_INSTANCE_HOOK(
     ActorTickHook,
     ll::memory::HookPriority::Normal,
@@ -129,9 +132,7 @@ LL_TYPE_INSTANCE_HOOK(
             static_cast<std::uint64_t>(config.priorityAfterTicks));
 
     // ── 限流 ──────────────────────────────────────────────
-    // 普通实体：只能用前 (maxPerTick - reservedSlots) 个配额
-    // 优先实体：可以用到全部 maxPerTick 配额
-    const int normalLimit   = config.maxPerTick - config.reservedSlots;
+    const int normalLimit    = config.maxPerTick - config.reservedSlots;
     const int effectiveLimit = isPrioritized ? config.maxPerTick : normalLimit;
 
     if (processedThisTick >= effectiveLimit) {
@@ -157,9 +158,82 @@ LL_TYPE_INSTANCE_HOOK(
     return result;
 }
 
+// ── Push Hook：跳过零向量 ─────────────────────────────────
+LL_TYPE_INSTANCE_HOOK(
+    PushVec0Hook,
+    ll::memory::HookPriority::Normal,
+    PushableComponent,
+    &PushableComponent::push,
+    void,
+    Actor&      owner,
+    Vec3 const& vec
+) {
+    if (!config.pushOptEnabled || !config.disableVec0Push) {
+        return origin(owner, vec);
+    }
+    if (vec == Vec3::ZERO) {
+        return;
+    }
+    origin(owner, vec);
+}
+
+// ── Push Hook：限制每实体每 tick 被推次数 ─────────────────
+LL_TYPE_INSTANCE_HOOK(
+    PushMaxTimesHook,
+    ll::memory::HookPriority::Normal,
+    PushableComponent,
+    &PushableComponent::push,
+    void,
+    Actor& owner,
+    Actor& other,
+    bool   pushSelfOnly
+) {
+    if (!config.pushOptEnabled || config.maxPushTimesPerTick < 0) {
+        return origin(owner, other, pushSelfOnly);
+    }
+    if (config.unlimitedPlayerPush && (owner.isPlayer() || other.isPlayer())) {
+        return origin(owner, other, pushSelfOnly);
+    }
+
+    auto it = pushedEntityTimes.find(&owner);
+    if (it != pushedEntityTimes.end()) {
+        if (it->second >= config.maxPushTimesPerTick) {
+            return;
+        }
+        ++it->second;
+    } else {
+        pushedEntityTimes[&owner] = 1;
+    }
+
+    origin(owner, other, pushSelfOnly);
+}
+
+// ── Level::tick Hook：每 tick 清理推挤计数 ────────────────
+LL_TYPE_INSTANCE_HOOK(
+    LevelTickHook,
+    ll::memory::HookPriority::Normal,
+    Level,
+    &Level::$tick,
+    void
+) {
+    origin();
+    pushedEntityTimes.clear();
+}
+
 // ── 注册 / 注销 ───────────────────────────────────────────
-void registerHooks()   { ActorTickHook::hook(); }
-void unregisterHooks() { ActorTickHook::unhook(); }
+void registerHooks() {
+    ActorTickHook::hook();
+    PushVec0Hook::hook();
+    PushMaxTimesHook::hook();
+    LevelTickHook::hook();
+}
+
+void unregisterHooks() {
+    ActorTickHook::unhook();
+    PushVec0Hook::unhook();
+    PushMaxTimesHook::unhook();
+    LevelTickHook::unhook();
+}
 
 // ── PluginImpl ────────────────────────────────────────────
 PluginImpl& PluginImpl::getInstance() {
@@ -168,60 +242,4 @@ PluginImpl& PluginImpl::getInstance() {
 }
 
 bool PluginImpl::load() {
-    std::filesystem::create_directories(getSelf().getConfigDir());
-    const auto configPath = getSelf().getConfigDir() / "config.json";
-
-    if (!ll::config::loadConfig(config, configPath)) {
-        logger().warn("Failed to load config, using defaults.");
-        ll::config::saveConfig(config, configPath);
-    }
-
-    return true;
-}
-
-bool PluginImpl::enable() {
-    // 防止 reservedSlots 配置错误导致 normalLimit 为负
-    if (config.reservedSlots >= config.maxPerTick) {
-        logger().warn(
-            "reservedSlots({}) >= maxPerTick({}), resetting to half.",
-            config.reservedSlots,
-            config.maxPerTick
-        );
-        config.reservedSlots = config.maxPerTick / 2;
-    }
-
-    registerHooks();
-
-    logger().info(
-        "Enabled. maxPerTick={}, cooldownTicks={}, reservedSlots={}, priorityAfterTicks={}, debug={}",
-        config.maxPerTick,
-        config.cooldownTicks,
-        config.reservedSlots,
-        config.priorityAfterTicks,
-        config.debug
-    );
-
-    return true;
-}
-
-bool PluginImpl::disable() {
-    unregisterHooks();
-
-    auto s = getStats();
-    logger().info(
-        "Disabled. processed={}, cooldownSkipped={}, throttleSkipped={}, prioritized={}",
-        s.totalProcessed,
-        s.totalCooldownSkipped,
-        s.totalThrottleSkipped,
-        s.totalPrioritized
-    );
-
-    return true;
-}
-
-} // namespace mob_ai_optimizer
-
-LL_REGISTER_MOD(
-    mob_ai_optimizer::PluginImpl,
-    mob_ai_optimizer::PluginImpl::getInstance()
-);
+    std::filesystem::create_direct_
