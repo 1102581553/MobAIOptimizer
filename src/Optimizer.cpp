@@ -8,6 +8,8 @@
 #include "mc/world/actor/Actor.h"
 #include "mc/world/level/BlockSource.h"
 #include "mc/world/level/Level.h"
+#include "mc/world/level/Tick.h"
+
 
 #include <filesystem>
 #include <unordered_map>
