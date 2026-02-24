@@ -1,29 +1,47 @@
+// Optimizer.h
 #pragma once
-#include <cstdint>
-#include <unordered_map>
-#include "ll/api/Config.h"
+#include <ll/api/Config.h>
+#include <ll/api/io/Logger.h>
+#include <ll/api/mod/NativeMod.h>
 
 namespace mob_ai_optimizer {
 
-// ── 配置 ──────────────────────────────────────────────────────────────────────
 struct Config {
     int  version       = 1;
     bool enabled       = true;
-    int  maxPerTick    = 200;
-    int  cooldownTicks = 3;
+    int  maxPerTick    = 32;
+    int  cooldownTicks = 4;
 };
 
-// ── 统计 ──────────────────────────────────────────────────────────────────────
 struct Stats {
     std::uint64_t totalProcessed       = 0;
     std::uint64_t totalCooldownSkipped = 0;
     std::uint64_t totalThrottleSkipped = 0;
 };
 
+Config&         getConfig();
+ll::io::Logger& logger();
+
 Stats getStats();
 void  resetStats();
 
 void registerHooks();
 void unregisterHooks();
+
+class PluginImpl {
+public:
+    static PluginImpl& getInstance();
+
+    PluginImpl() : mSelf(*ll::mod::NativeMod::current()) {}
+
+    [[nodiscard]] ll::mod::NativeMod& getSelf() const { return mSelf; }
+
+    bool load();
+    bool enable();
+    bool disable();
+
+private:
+    ll::mod::NativeMod& mSelf;
+};
 
 } // namespace mob_ai_optimizer
