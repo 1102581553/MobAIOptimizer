@@ -2,58 +2,36 @@
 #include <ll/api/Config.h>
 #include <ll/api/io/Logger.h>
 #include <ll/api/mod/NativeMod.h>
+#include <unordered_map>
+#include <mc/legacy/ActorUniqueID.h>
 
 namespace mob_ai_optimizer {
 
 struct Config {
-    int  version = 8;
+    int  version = 2;
     bool enabled = true;
+    bool debug   = false;
 
     // 动态调节目标
-    int targetTickMs = 40;
-
-    // 各项步长
-    int maxPerTickStep       = 4;
-    int cooldownTicksStep    = 1;
-    int pushTimesStep        = 1;
-    int reservedSlotsStep    = 1;
-    int priorityAfterStep    = 2;
-
-    // 推挤优化
-    bool pushOptEnabled      = true;
-    bool disableVec0Push     = true;
-    bool unlimitedPlayerPush = true;
-
-    // 调试
-    bool debug                   = false;
-    int  debugLogIntervalSeconds = 5;
+    int targetTickMs      = 50;
+    int maxPerTickStep    = 4;
+    int cooldownTicksStep = 1;
 
     // 内部维护
-    int cleanupIntervalSeconds = 3;
-    int expiryMultiplier       = 2;
+    int cleanupIntervalTicks = 100;
+    int maxExpiredAge        = 600;
+    int initialMapReserve    = 1000;
 };
 
-struct Stats {
-    std::uint64_t totalProcessed       = 0;
-    std::uint64_t totalCooldownSkipped = 0;
-    std::uint64_t totalThrottleSkipped = 0;
-    std::uint64_t totalPrioritized     = 0;
-};
+Config& getConfig();
+bool    loadConfig();
+bool    saveConfig();
 
-Config&         getConfig();
-ll::io::Logger& logger();
-
-Stats getStats();
-void  resetStats();
-
-void registerHooks();
-void unregisterHooks();
-
-class PluginImpl {
+class Optimizer {
 public:
-    static PluginImpl& getInstance();
+    static Optimizer& getInstance();
 
-    PluginImpl() : mSelf(*ll::mod::NativeMod::current()) {}
+    Optimizer() : mSelf(*ll::mod::NativeMod::current()) {}
 
     [[nodiscard]] ll::mod::NativeMod& getSelf() const { return mSelf; }
 
