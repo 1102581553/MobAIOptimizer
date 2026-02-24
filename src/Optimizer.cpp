@@ -33,7 +33,7 @@ static std::uint64_t lastDebugTick   = 0;
 static std::uint64_t lastCleanupTick = 0;
 
 static std::unordered_map<std::int64_t, ActorState> actorStates;
-static std::unordered_map<Actor*, int>               pushedEntityTimes;
+static std::unordered_map<Actor*, int>              pushedEntityTimes;
 
 // ─────────────────────────────────────────────────────────
 
@@ -65,12 +65,10 @@ LL_TYPE_INSTANCE_HOOK(
     const std::uint64_t currentTick =
         this->getLevel().getCurrentTick().tickID;
 
-    // ── Tick 切换 ─────────────────────────────────────────
     if (currentTick != lastTickId) {
         lastTickId        = currentTick;
         processedThisTick = 0;
 
-        // 定时清理过期状态
         const std::uint64_t cleanupInterval =
             static_cast<std::uint64_t>(config.cleanupIntervalSeconds) * 20;
 
@@ -89,7 +87,6 @@ LL_TYPE_INSTANCE_HOOK(
             }
         }
 
-        // Debug 日志
         if (config.debug) {
             const std::uint64_t debugInterval =
                 static_cast<std::uint64_t>(config.debugLogIntervalSeconds) * 20;
@@ -111,10 +108,8 @@ LL_TYPE_INSTANCE_HOOK(
 
     const std::int64_t uid = this->getOrCreateUniqueID().rawID;
     auto [it, inserted]    = actorStates.emplace(uid, ActorState{});
-
     ActorState& state = it->second;
 
-    // ── 冷却判断 ──────────────────────────────────────────
     if (!inserted &&
         currentTick - state.lastAiTick <
             static_cast<std::uint64_t>(config.cooldownTicks))
@@ -123,7 +118,6 @@ LL_TYPE_INSTANCE_HOOK(
         return true;
     }
 
-    // ── 判断是否进入优先队列 ──────────────────────────────
     const bool isWaiting     = state.pendingSince > 0;
     const bool isPrioritized =
         isWaiting &&
@@ -131,7 +125,6 @@ LL_TYPE_INSTANCE_HOOK(
         (currentTick - state.pendingSince >=
             static_cast<std::uint64_t>(config.priorityAfterTicks));
 
-    // ── 限流 ──────────────────────────────────────────────
     const int normalLimit    = config.maxPerTick - config.reservedSlots;
     const int effectiveLimit = isPrioritized ? config.maxPerTick : normalLimit;
 
@@ -143,7 +136,6 @@ LL_TYPE_INSTANCE_HOOK(
         return true;
     }
 
-    // ── 实际处理 ──────────────────────────────────────────
     ++processedThisTick;
 
     if (isPrioritized) {
@@ -171,9 +163,12 @@ LL_TYPE_INSTANCE_HOOK(
     if (!config.pushOptEnabled || !config.disableVec0Push) {
         return origin(owner, vec);
     }
-    if (vec == Vec3::ZERO) {
+
+    // 修正：ZERO 是函数
+    if (vec == Vec3::ZERO()) {
         return;
     }
+
     origin(owner, vec);
 }
 
@@ -191,6 +186,7 @@ LL_TYPE_INSTANCE_HOOK(
     if (!config.pushOptEnabled || config.maxPushTimesPerTick < 0) {
         return origin(owner, other, pushSelfOnly);
     }
+
     if (config.unlimitedPlayerPush && (owner.isPlayer() || other.isPlayer())) {
         return origin(owner, other, pushSelfOnly);
     }
@@ -242,4 +238,63 @@ PluginImpl& PluginImpl::getInstance() {
 }
 
 bool PluginImpl::load() {
-    std::filesystem::create_direct_
+    std::filesystem::create_directories(getSelf().getConfigDir());
+    const auto configPath = getSelf().getConfigDir() / "config.json";
+
+    if (!ll::config::loadConfig(config, configPath)) {
+        logger().warn("Failed to load config, using defaults.");
+        ll::config::saveConfig(config, configPath);
+    }
+
+    return true;
+}
+
+bool PluginImpl::enable() {
+    if (config.reservedSlots >= config.maxPerTick) {
+        logger().warn(
+            "reservedSlots({}) >= maxPerTick({}), resetting to half.",
+            config.reservedSlots,
+            config.maxPerTick
+        );
+        config.reservedSlots = config.maxPerTick / 2;
+    }
+
+    registerHooks();
+
+    logger().info(
+        "Enabled. maxPerTick={}, cooldownTicks={}, reservedSlots={}, priorityAfterTicks={}, "
+        "pushOpt={}, disableVec0Push={}, maxPushTimesPerTick={}, debug={}",
+        config.maxPerTick,
+        config.cooldownTicks,
+        config.reservedSlots,
+        config.priorityAfterTicks,
+        config.pushOptEnabled,
+        config.disableVec0Push,
+        config.maxPushTimesPerTick,
+        config.debug
+    );
+
+    return true;
+}
+
+bool PluginImpl::disable() {
+    unregisterHooks();
+
+    auto s = getStats();
+    logger().info(
+        "Disabled. processed={}, cooldownSkipped={}, throttleSkipped={}, prioritized={}",
+        s.totalProcessed,
+        s.totalCooldownSkipped,
+        s.totalThrottleSkipped,
+        s.totalPrioritized
+    );
+
+    return true;
+}
+
+} // namespace mob_ai_optimizer
+
+LL_REGISTER_MOD(
+    mob_ai_optimizer::PluginImpl,
+    mob_ai_optimizer::PluginImpl::getInstance()
+);
