@@ -30,8 +30,13 @@ static Stats                           gStats{};
 
 static std::uint64_t lastTickId        = 0;
 static int           processedThisTick = 0;
-static int           dynamicMaxPerTick  = 40;
-static int           dynamicMaxPushTimes = 10;
+
+// 动态参数运行时值
+static int dynMaxPerTick      = 40;
+static int dynCooldownTicks   = 4;
+static int dynMaxPushTimes    = 10;
+static int dynReservedSlots   = 4;
+static int dynPriorityAfter   = 20;
 
 static std::uint64_t lastDebugTick   = 0;
 static std::uint64_t lastCleanupTick = 0;
@@ -80,7 +85,7 @@ LL_TYPE_INSTANCE_HOOK(
             lastCleanupTick = currentTick;
 
             const std::uint64_t expiry =
-                static_cast<std::uint64_t>(config.cooldownTicks) *
+                static_cast<std::uint64_t>(dynCooldownTicks) *
                 static_cast<std::uint64_t>(config.expiryMultiplier);
 
             for (auto it = actorStates.begin(); it != actorStates.end();) {
@@ -99,10 +104,10 @@ LL_TYPE_INSTANCE_HOOK(
                 lastDebugTick = currentTick;
 
                 logger().info(
-                    "[Debug] dynamicMaxPerTick={}, dynamicMaxPushTimes={}, processed={}, "
-                    "cooldownSkipped={}, throttleSkipped={}, prioritized={}, cacheSize={}",
-                    dynamicMaxPerTick,
-                    dynamicMaxPushTimes,
+                    "[Debug] maxPerTick={}, cooldown={}, pushTimes={}, reserved={}, priorityAfter={} | "
+                    "processed={}, cooldownSkipped={}, throttleSkipped={}, prioritized={}, cacheSize={}",
+                    dynMaxPerTick, dynCooldownTicks, dynMaxPushTimes,
+                    dynReservedSlots, dynPriorityAfter,
                     gStats.totalProcessed,
                     gStats.totalCooldownSkipped,
                     gStats.totalThrottleSkipped,
@@ -119,7 +124,7 @@ LL_TYPE_INSTANCE_HOOK(
 
     if (!inserted &&
         currentTick - state.lastAiTick <
-            static_cast<std::uint64_t>(config.cooldownTicks))
+            static_cast<std::uint64_t>(dynCooldownTicks))
     {
         ++gStats.totalCooldownSkipped;
         return true;
@@ -128,12 +133,12 @@ LL_TYPE_INSTANCE_HOOK(
     const bool isWaiting     = state.pendingSince > 0;
     const bool isPrioritized =
         isWaiting &&
-        config.priorityAfterTicks > 0 &&
+        dynPriorityAfter > 0 &&
         (currentTick - state.pendingSince >=
-            static_cast<std::uint64_t>(config.priorityAfterTicks));
+            static_cast<std::uint64_t>(dynPriorityAfter));
 
-    const int normalLimit    = dynamicMaxPerTick - config.reservedSlots;
-    const int effectiveLimit = isPrioritized ? dynamicMaxPerTick : normalLimit;
+    const int normalLimit    = dynMaxPerTick - dynReservedSlots;
+    const int effectiveLimit = isPrioritized ? dynMaxPerTick : normalLimit;
 
     if (processedThisTick >= effectiveLimit) {
         if (!isWaiting) {
@@ -199,7 +204,7 @@ LL_TYPE_INSTANCE_HOOK(
 
     auto it = pushedEntityTimes.find(&owner);
     if (it != pushedEntityTimes.end()) {
-        if (it->second >= dynamicMaxPushTimes) {
+        if (it->second >= dynMaxPushTimes) {
             return;
         }
         ++it->second;
@@ -210,7 +215,7 @@ LL_TYPE_INSTANCE_HOOK(
     origin(owner, other, pushSelfOnly);
 }
 
-// ── Level::tick Hook：测量耗时并动态调整 ─────────────────
+// ── Level::tick Hook：测量耗时并动态调整所有参数 ──────────
 LL_TYPE_INSTANCE_HOOK(
     LevelTickHook,
     ll::memory::HookPriority::Normal,
@@ -229,11 +234,19 @@ LL_TYPE_INSTANCE_HOOK(
     ).count();
 
     if (elapsed > config.targetTickMs) {
-        dynamicMaxPerTick   = std::max(0, dynamicMaxPerTick - config.maxPerTickStep);
-        dynamicMaxPushTimes = std::max(1, dynamicMaxPushTimes - config.pushTimesStep);
+        // 压力大：收紧所有限制
+        dynMaxPerTick    = std::max(0,  dynMaxPerTick    - config.maxPerTickStep);
+        dynCooldownTicks = std::max(1,  dynCooldownTicks + config.cooldownTicksStep); // cooldown 越大越省
+        dynMaxPushTimes  = std::max(1,  dynMaxPushTimes  - config.pushTimesStep);
+        dynReservedSlots = std::max(0,  dynReservedSlots - config.reservedSlotsStep); // 保留槽减少，节流更激进
+        dynPriorityAfter = dynPriorityAfter + config.priorityAfterStep;               // 等更久才优先
     } else {
-        dynamicMaxPerTick   += config.maxPerTickStep;
-        dynamicMaxPushTimes += config.pushTimesStep;
+        // 压力小：放宽所有限制
+        dynMaxPerTick    += config.maxPerTickStep;
+        dynCooldownTicks  = std::max(1, dynCooldownTicks - config.cooldownTicksStep);
+        dynMaxPushTimes  += config.pushTimesStep;
+        dynReservedSlots += config.reservedSlotsStep;
+        dynPriorityAfter  = std::max(1, dynPriorityAfter - config.priorityAfterStep);
     }
 }
 
@@ -271,32 +284,19 @@ bool PluginImpl::load() {
 }
 
 bool PluginImpl::enable() {
-    dynamicMaxPerTick   = config.maxPerTickStep * 10;
-    dynamicMaxPushTimes = config.pushTimesStep * 10;
-
-    if (config.reservedSlots >= dynamicMaxPerTick) {
-        logger().warn(
-            "reservedSlots({}) >= initial dynamicMaxPerTick({}), resetting to half.",
-            config.reservedSlots,
-            dynamicMaxPerTick
-        );
-        config.reservedSlots = dynamicMaxPerTick / 2;
-    }
+    dynMaxPerTick    = config.maxPerTickStep    * 10;
+    dynCooldownTicks = config.cooldownTicksStep * 4;
+    dynMaxPushTimes  = config.pushTimesStep     * 10;
+    dynReservedSlots = config.reservedSlotsStep * 4;
+    dynPriorityAfter = config.priorityAfterStep * 10;
 
     registerHooks();
 
     logger().info(
-        "Enabled. initMaxPerTick={}, initMaxPushTimes={}, targetTickMs={}, "
-        "maxPerTickStep={}, pushTimesStep={}, cooldownTicks={}, reservedSlots={}, "
-        "priorityAfterTicks={}, pushOpt={}, disableVec0Push={}, debug={}",
-        dynamicMaxPerTick,
-        dynamicMaxPushTimes,
+        "Enabled. targetTickMs={} | init: maxPerTick={}, cooldown={}, pushTimes={}, reserved={}, priorityAfter={} | "
+        "pushOpt={}, disableVec0Push={}, debug={}",
         config.targetTickMs,
-        config.maxPerTickStep,
-        config.pushTimesStep,
-        config.cooldownTicks,
-        config.reservedSlots,
-        config.priorityAfterTicks,
+        dynMaxPerTick, dynCooldownTicks, dynMaxPushTimes, dynReservedSlots, dynPriorityAfter,
         config.pushOptEnabled,
         config.disableVec0Push,
         config.debug
