@@ -1,4 +1,3 @@
-// Optimizer.cpp
 #include "Optimizer.h"
 
 #include "ll/api/memory/Hook.h"
@@ -14,7 +13,13 @@
 
 namespace mob_ai_optimizer {
 
-// ── 全局状态 ─────────────────────────────────────────────
+// ── 每个实体的状态 ────────────────────────────────────────
+struct ActorState {
+    std::uint64_t lastAiTick   = 0; // 上次实际执行 AI 的 tick
+    std::uint64_t pendingSince = 0; // 开始被 throttle 的 tick，0 = 未在等待
+};
+
+// ── 全局状态 ──────────────────────────────────────────────
 static Config                          config;
 static std::shared_ptr<ll::io::Logger> log;
 static Stats                           gStats{};
@@ -22,12 +27,12 @@ static Stats                           gStats{};
 static std::uint64_t lastTickId        = 0;
 static int           processedThisTick = 0;
 
-static std::uint64_t lastDebugTick     = 0;
-static std::uint64_t lastCleanupTick   = 0;
+static std::uint64_t lastDebugTick   = 0;
+static std::uint64_t lastCleanupTick = 0;
 
-static std::unordered_map<std::int64_t, std::uint64_t> lastAiTick;
+static std::unordered_map<std::int64_t, ActorState> actorStates;
 
-// ────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────
 
 Config& getConfig() { return config; }
 
@@ -41,7 +46,7 @@ ll::io::Logger& logger() {
 Stats getStats()   { return gStats; }
 void  resetStats() { gStats = {}; }
 
-// ── Hook ────────────────────────────────────────────────
+// ── Hook ──────────────────────────────────────────────────
 LL_TYPE_INSTANCE_HOOK(
     ActorTickHook,
     ll::memory::HookPriority::Normal,
@@ -57,12 +62,12 @@ LL_TYPE_INSTANCE_HOOK(
     const std::uint64_t currentTick =
         this->getLevel().getCurrentTick().tickID;
 
-    // ── Tick 切换 ───────────────────────────────────────
+    // ── Tick 切换 ─────────────────────────────────────────
     if (currentTick != lastTickId) {
         lastTickId        = currentTick;
         processedThisTick = 0;
 
-        // ── 定时清理 UID 表 ─────────────────────────────
+        // 定时清理过期状态
         const std::uint64_t cleanupInterval =
             static_cast<std::uint64_t>(config.cleanupIntervalSeconds) * 20;
 
@@ -71,17 +76,17 @@ LL_TYPE_INSTANCE_HOOK(
 
             const std::uint64_t expiry =
                 static_cast<std::uint64_t>(config.cooldownTicks) *
-                config.expiryMultiplier;
+                static_cast<std::uint64_t>(config.expiryMultiplier);
 
-            for (auto it = lastAiTick.begin(); it != lastAiTick.end();) {
-                if (currentTick - it->second > expiry)
-                    it = lastAiTick.erase(it);
+            for (auto it = actorStates.begin(); it != actorStates.end();) {
+                if (currentTick - it->second.lastAiTick > expiry)
+                    it = actorStates.erase(it);
                 else
                     ++it;
             }
         }
 
-        // ── Debug 日志 ─────────────────────────────────
+        // Debug 日志
         if (config.debug) {
             const std::uint64_t debugInterval =
                 static_cast<std::uint64_t>(config.debugLogIntervalSeconds) * 20;
@@ -90,48 +95,73 @@ LL_TYPE_INSTANCE_HOOK(
                 lastDebugTick = currentTick;
 
                 logger().info(
-                    "[Debug] processed={}, cooldownSkipped={}, throttleSkipped={}, cacheSize={}",
+                    "[Debug] processed={}, cooldownSkipped={}, throttleSkipped={}, prioritized={}, cacheSize={}",
                     gStats.totalProcessed,
                     gStats.totalCooldownSkipped,
                     gStats.totalThrottleSkipped,
-                    lastAiTick.size()
+                    gStats.totalPrioritized,
+                    actorStates.size()
                 );
             }
         }
     }
 
-    // ── 全局限流 ───────────────────────────────────────
-    if (processedThisTick >= config.maxPerTick) {
-        ++gStats.totalThrottleSkipped;
-        return true;
-    }
-
     const std::int64_t uid = this->getOrCreateUniqueID().rawID;
-    auto [it, inserted]    = lastAiTick.emplace(uid, 0);
+    auto [it, inserted]    = actorStates.emplace(uid, ActorState{});
 
-    // ── 冷却判断 ───────────────────────────────────────
+    ActorState& state = it->second;
+
+    // ── 冷却判断 ──────────────────────────────────────────
     if (!inserted &&
-        currentTick - it->second <
+        currentTick - state.lastAiTick <
             static_cast<std::uint64_t>(config.cooldownTicks))
     {
         ++gStats.totalCooldownSkipped;
         return true;
     }
 
+    // ── 判断是否进入优先队列 ──────────────────────────────
+    const bool isWaiting     = state.pendingSince > 0;
+    const bool isPrioritized =
+        isWaiting &&
+        config.priorityAfterTicks > 0 &&
+        (currentTick - state.pendingSince >=
+            static_cast<std::uint64_t>(config.priorityAfterTicks));
+
+    // ── 限流 ──────────────────────────────────────────────
+    // 普通实体：只能用前 (maxPerTick - reservedSlots) 个配额
+    // 优先实体：可以用到全部 maxPerTick 配额
+    const int normalLimit   = config.maxPerTick - config.reservedSlots;
+    const int effectiveLimit = isPrioritized ? config.maxPerTick : normalLimit;
+
+    if (processedThisTick >= effectiveLimit) {
+        if (!isWaiting) {
+            state.pendingSince = currentTick;
+        }
+        ++gStats.totalThrottleSkipped;
+        return true;
+    }
+
+    // ── 实际处理 ──────────────────────────────────────────
     ++processedThisTick;
 
-    bool result = origin(region);
-    it->second  = currentTick;
+    if (isPrioritized) {
+        ++gStats.totalPrioritized;
+    }
 
+    state.pendingSince = 0;
+    state.lastAiTick   = currentTick;
+
+    bool result = origin(region);
     ++gStats.totalProcessed;
     return result;
 }
 
-// ── 注册 / 注销 ────────────────────────────────────────
+// ── 注册 / 注销 ───────────────────────────────────────────
 void registerHooks()   { ActorTickHook::hook(); }
 void unregisterHooks() { ActorTickHook::unhook(); }
 
-// ── PluginImpl ─────────────────────────────────────────
+// ── PluginImpl ────────────────────────────────────────────
 PluginImpl& PluginImpl::getInstance() {
     static PluginImpl instance;
     return instance;
@@ -150,12 +180,24 @@ bool PluginImpl::load() {
 }
 
 bool PluginImpl::enable() {
+    // 防止 reservedSlots 配置错误导致 normalLimit 为负
+    if (config.reservedSlots >= config.maxPerTick) {
+        logger().warn(
+            "reservedSlots({}) >= maxPerTick({}), resetting to half.",
+            config.reservedSlots,
+            config.maxPerTick
+        );
+        config.reservedSlots = config.maxPerTick / 2;
+    }
+
     registerHooks();
 
     logger().info(
-        "Enabled. maxPerTick={}, cooldownTicks={}, debug={}",
+        "Enabled. maxPerTick={}, cooldownTicks={}, reservedSlots={}, priorityAfterTicks={}, debug={}",
         config.maxPerTick,
         config.cooldownTicks,
+        config.reservedSlots,
+        config.priorityAfterTicks,
         config.debug
     );
 
@@ -167,10 +209,11 @@ bool PluginImpl::disable() {
 
     auto s = getStats();
     logger().info(
-        "Disabled. processed={}, cooldownSkipped={}, throttleSkipped={}",
+        "Disabled. processed={}, cooldownSkipped={}, throttleSkipped={}, prioritized={}",
         s.totalProcessed,
         s.totalCooldownSkipped,
-        s.totalThrottleSkipped
+        s.totalThrottleSkipped,
+        s.totalPrioritized
     );
 
     return true;
