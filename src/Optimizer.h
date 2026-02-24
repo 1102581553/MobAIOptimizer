@@ -7,10 +7,18 @@
 namespace mob_ai_optimizer {
 
 struct Config {
-    int  version       = 1;
+    int  version       = 2;
+
     bool enabled       = true;
+
     int  maxPerTick    = 32;
     int  cooldownTicks = 4;
+
+    // ───── 新增 ─────
+    bool debug                     = false; // 是否开启调试日志
+    int  debugLogIntervalSeconds   = 5;     // 每多少秒打印一次统计
+    int  cleanupIntervalSeconds    = 3;     // 多久清理一次 UID 表
+    int  expiryMultiplier          = 2;     // UID 过期倍数
 };
 
 struct Stats {
