@@ -6,22 +6,22 @@
 namespace mob_ai_optimizer {
 
 struct Config {
-    int  version       = 7;
-    bool enabled       = true;
-    int  cooldownTicks = 4;
+    int  version = 8;
+    bool enabled = true;
 
-    // 动态 maxPerTick
-    int  targetTickMs   = 40;
-    int  maxPerTickStep = 4;
+    // 动态调节目标
+    int targetTickMs = 40;
 
-    // 优先级
-    int  reservedSlots      = 8;
-    int  priorityAfterTicks = 20;
+    // 各项步长
+    int maxPerTickStep       = 4;
+    int cooldownTicksStep    = 1;
+    int pushTimesStep        = 1;
+    int reservedSlotsStep    = 1;
+    int priorityAfterStep    = 2;
 
     // 推挤优化
     bool pushOptEnabled      = true;
     bool disableVec0Push     = true;
-    int  pushTimesStep       = 1;
     bool unlimitedPlayerPush = true;
 
     // 调试
@@ -29,8 +29,8 @@ struct Config {
     int  debugLogIntervalSeconds = 5;
 
     // 内部维护
-    int  cleanupIntervalSeconds = 3;
-    int  expiryMultiplier       = 2;
+    int cleanupIntervalSeconds = 3;
+    int expiryMultiplier       = 2;
 };
 
 struct Stats {
