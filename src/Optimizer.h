@@ -6,10 +6,13 @@
 namespace mob_ai_optimizer {
 
 struct Config {
-    int  version       = 4;
+    int  version       = 7;
     bool enabled       = true;
-    int  maxPerTick    = 32;
     int  cooldownTicks = 4;
+
+    // 动态 maxPerTick
+    int  targetTickMs   = 40;
+    int  maxPerTickStep = 4;
 
     // 优先级
     int  reservedSlots      = 8;
@@ -18,7 +21,7 @@ struct Config {
     // 推挤优化
     bool pushOptEnabled      = true;
     bool disableVec0Push     = true;
-    int  maxPushTimesPerTick = 3;    // -1 = 不限制
+    int  pushTimesStep       = 1;
     bool unlimitedPlayerPush = true;
 
     // 调试
