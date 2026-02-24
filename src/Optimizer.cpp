@@ -16,7 +16,7 @@
 
 namespace mob_ai_optimizer {
 
-// ── 全局变量 ──────────────────────────────────────────────
+// 全局
 static Config config;
 static std::shared_ptr<ll::io::Logger> log;
 static bool debugTaskRunning = false;
@@ -37,7 +37,7 @@ static size_t totalThrottleSkipped  = 0;
 static size_t totalDespawnCleaned   = 0;
 static size_t totalExpiredCleaned   = 0;
 
-// ── Logger ────────────────────────────────────────────────
+// Logger
 static ll::io::Logger& getLogger() {
     if (!log) {
         log = ll::io::LoggerRegistry::getInstance().getOrCreate("MobAIOptimizer");
@@ -45,7 +45,7 @@ static ll::io::Logger& getLogger() {
     return *log;
 }
 
-// ── Config ────────────────────────────────────────────────
+// Config
 Config& getConfig() { return config; }
 
 bool loadConfig() {
@@ -65,7 +65,7 @@ bool saveConfig() {
     return ll::config::saveConfig(config, path);
 }
 
-// ── Debug ─────────────────────────────────────────────────
+// Debug
 static void resetStats() {
     totalProcessed = totalCooldownSkipped = totalThrottleSkipped = 0;
     totalDespawnCleaned = totalExpiredCleaned = 0;
@@ -102,7 +102,7 @@ static void startDebugTask() {
 
 static void stopDebugTask() { debugTaskRunning = false; }
 
-// ── 插件生命周期 ──────────────────────────────────────────
+// 插件生命周期
 Optimizer& Optimizer::getInstance() {
     static Optimizer instance;
     return instance;
@@ -148,7 +148,7 @@ bool Optimizer::disable() {
 
 } // namespace mob_ai_optimizer
 
-// ── AI 优化 Hook ──────────────────────────────────────────
+// AI 优化 Hook
 LL_AUTO_TYPE_INSTANCE_HOOK(
     MobAiStepHook,
     ll::memory::HookPriority::Normal,
@@ -204,7 +204,7 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
     ++totalProcessed;
 }
 
-// ── Level::tick Hook：测耗时动态调整 ─────────────────────
+// Level::tick Hook：测耗时动态调整
 LL_AUTO_TYPE_INSTANCE_HOOK(
     LevelTickHook,
     ll::memory::HookPriority::Normal,
@@ -232,7 +232,7 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
     }
 }
 
-// ── 自动清理 Hook ─────────────────────────────────────────
+// 清理 Hook
 LL_AUTO_TYPE_INSTANCE_HOOK(
     ActorDespawnHook,
     ll::memory::HookPriority::Normal,
@@ -263,5 +263,4 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
     origin();
 }
 
-// ── 注册插件 ──────────────────────────────────────────────
 LL_REGISTER_MOD(mob_ai_optimizer::Optimizer, mob_ai_optimizer::Optimizer::getInstance());
