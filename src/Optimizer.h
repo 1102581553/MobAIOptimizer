@@ -6,14 +6,20 @@
 namespace mob_ai_optimizer {
 
 struct Config {
-    int  version     = 3;
-    bool enabled     = true;
-    int  maxPerTick  = 32;
+    int  version       = 4;
+    bool enabled       = true;
+    int  maxPerTick    = 32;
     int  cooldownTicks = 4;
 
     // 优先级
-    int  reservedSlots      = 8;  // 为等待久的实体保留的配额
-    int  priorityAfterTicks = 20; // 等待多少 tick 后进入优先队列
+    int  reservedSlots      = 8;
+    int  priorityAfterTicks = 20;
+
+    // 推挤优化
+    bool pushOptEnabled      = true;
+    bool disableVec0Push     = true;
+    int  maxPushTimesPerTick = 3;    // -1 = 不限制
+    bool unlimitedPlayerPush = true;
 
     // 调试
     bool debug                   = false;
