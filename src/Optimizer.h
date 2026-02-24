@@ -1,4 +1,3 @@
-// Optimizer.h
 #pragma once
 #include <ll/api/Config.h>
 #include <ll/api/io/Logger.h>
@@ -7,24 +6,29 @@
 namespace mob_ai_optimizer {
 
 struct Config {
-    int  version       = 2;
-
-    bool enabled       = true;
-
-    int  maxPerTick    = 32;
+    int  version     = 3;
+    bool enabled     = true;
+    int  maxPerTick  = 32;
     int  cooldownTicks = 4;
 
-    // ───── 新增 ─────
-    bool debug                     = false; // 是否开启调试日志
-    int  debugLogIntervalSeconds   = 5;     // 每多少秒打印一次统计
-    int  cleanupIntervalSeconds    = 3;     // 多久清理一次 UID 表
-    int  expiryMultiplier          = 2;     // UID 过期倍数
+    // 优先级
+    int  reservedSlots      = 8;  // 为等待久的实体保留的配额
+    int  priorityAfterTicks = 20; // 等待多少 tick 后进入优先队列
+
+    // 调试
+    bool debug                   = false;
+    int  debugLogIntervalSeconds = 5;
+
+    // 内部维护
+    int  cleanupIntervalSeconds = 3;
+    int  expiryMultiplier       = 2;
 };
 
 struct Stats {
     std::uint64_t totalProcessed       = 0;
     std::uint64_t totalCooldownSkipped = 0;
     std::uint64_t totalThrottleSkipped = 0;
+    std::uint64_t totalPrioritized     = 0;
 };
 
 Config&         getConfig();
