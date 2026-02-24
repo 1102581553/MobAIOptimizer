@@ -1,32 +1,42 @@
+// Optimizer.cpp
 #include "Optimizer.h"
 
 #include "ll/api/memory/Hook.h"
-#include <ll/api/mod/NativeMod.h>
-#include "ll/api/plugin/RegisterHelper.h"
-#include "ll/api/Logger.h"
+#include "ll/api/mod/RegisterHelper.h"
+#include "ll/api/io/Logger.h"
+#include "ll/api/io/LoggerRegistry.h"
 #include "mc/world/actor/Actor.h"
 #include "mc/world/level/BlockSource.h"
 #include "mc/world/level/Level.h"
 
+#include <filesystem>
 #include <unordered_map>
 
 namespace mob_ai_optimizer {
 
 // ── 全局状态 ──────────────────────────────────────────────────────────────────
-Config config{};
-
-static ll::Logger logger("MobAIOptimizer");
+static Config                          config;
+static std::shared_ptr<ll::io::Logger> log;
+static Stats                           gStats{};
 
 static std::uint64_t lastTickId        = 0;
 static int           processedThisTick = 0;
 static std::unordered_map<std::int64_t, std::uint64_t> lastAiTick;
-static Stats gStats{};
+
+Config& getConfig() { return config; }
+
+ll::io::Logger& logger() {
+    if (!log) {
+        log = ll::io::LoggerRegistry::getInstance().getOrCreate("MobAIOptimizer");
+    }
+    return *log;
+}
 
 Stats getStats()   { return gStats; }
 void  resetStats() { gStats = {}; }
 
 // ── Hook ──────────────────────────────────────────────────────────────────────
-LL_AUTO_TYPE_INSTANCE_HOOK(
+LL_TYPE_INSTANCE_HOOK(
     ActorTickHook,
     ll::memory::HookPriority::Normal,
     Actor,
@@ -38,22 +48,19 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
         return origin(region);
     }
 
-    const std::uint64_t currentTick = this->getLevel().getCurrentServerTick().tickID;
+    const std::uint64_t currentTick = this->getLevel().getCurrentTick().tickID;
 
     if (currentTick != lastTickId) {
         lastTickId        = currentTick;
         processedThisTick = 0;
-    
-        // 每秒清理一次，避免每 tick O(N)
+
         if (currentTick % 20 == 0) {
-    
-            // 过期时间必须 >= cooldownTicks
             const std::uint64_t kExpiry =
                 std::max<std::uint64_t>(
                     static_cast<std::uint64_t>(config.cooldownTicks) * 2,
                     60ULL
                 );
-    
+
             for (auto it = lastAiTick.begin(); it != lastAiTick.end(); ) {
                 if (currentTick - it->second > kExpiry)
                     it = lastAiTick.erase(it);
@@ -62,7 +69,6 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
             }
         }
     }
-
 
     if (processedThisTick >= config.maxPerTick) {
         ++gStats.totalThrottleSkipped;
@@ -87,24 +93,28 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
 }
 
 // ── 注册 / 注销 ───────────────────────────────────────────────────────────────
-void registerHooks() { ActorTickHook::hook(); }
+void registerHooks()   { ActorTickHook::hook(); }
 void unregisterHooks() { ActorTickHook::unhook(); }
 
-// ── 插件入口 ──────────────────────────────────────────────────────────────────
-namespace {
+// ── PluginImpl ────────────────────────────────────────────────────────────────
+PluginImpl& PluginImpl::getInstance() {
+    static PluginImpl instance;
+    return instance;
+}
 
-bool load(ll::plugin::NativePlugin& self) {
-    const auto configPath = self.getConfigDir() / "config.json";
+bool PluginImpl::load() {
+    std::filesystem::create_directories(getSelf().getConfigDir());
+    const auto configPath = getSelf().getConfigDir() / "config.json";
     if (!ll::config::loadConfig(config, configPath)) {
-        logger.warn("Failed to load config, using defaults.");
+        logger().warn("Failed to load config, using defaults.");
         ll::config::saveConfig(config, configPath);
     }
     return true;
 }
 
-bool enable(ll::plugin::NativePlugin& /*self*/) {
+bool PluginImpl::enable() {
     registerHooks();
-    logger.info(
+    logger().info(
         "Enabled. maxPerTick={}, cooldownTicks={}",
         config.maxPerTick,
         config.cooldownTicks
@@ -112,10 +122,10 @@ bool enable(ll::plugin::NativePlugin& /*self*/) {
     return true;
 }
 
-bool disable(ll::plugin::NativePlugin& /*self*/) {
+bool PluginImpl::disable() {
     unregisterHooks();
     auto s = getStats();
-    logger.info(
+    logger().info(
         "Disabled. processed={}, cooldownSkipped={}, throttleSkipped={}",
         s.totalProcessed,
         s.totalCooldownSkipped,
@@ -124,10 +134,6 @@ bool disable(ll::plugin::NativePlugin& /*self*/) {
     return true;
 }
 
-} // namespace
-
 } // namespace mob_ai_optimizer
 
-LL_REGISTER_PLUGIN(mob_ai_optimizer::load,
-                   mob_ai_optimizer::enable,
-                   mob_ai_optimizer::disable);
+LL_REGISTER_MOD(mob_ai_optimizer::PluginImpl, mob_ai_optimizer::PluginImpl::getInstance());
