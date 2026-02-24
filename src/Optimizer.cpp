@@ -1,7 +1,7 @@
 #include "Optimizer.h"
 
 #include "ll/api/memory/Hook.h"
-#include "ll/api/plugin/NativePlugin.h"
+#include <ll/api/mod/NativeMod.h>
 #include "ll/api/plugin/RegisterHelper.h"
 #include "ll/api/Logger.h"
 #include "mc/world/actor/Actor.h"
