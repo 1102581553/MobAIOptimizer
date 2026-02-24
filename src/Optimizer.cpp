@@ -10,6 +10,8 @@
 #include "mc/entity/components_json_legacy/PushableComponent.h"
 #include "mc/deps/core/math/Vec3.h"
 
+#include <chrono>
+#include <algorithm>
 #include <filesystem>
 #include <unordered_map>
 
@@ -28,6 +30,8 @@ static Stats                           gStats{};
 
 static std::uint64_t lastTickId        = 0;
 static int           processedThisTick = 0;
+static int           dynamicMaxPerTick  = 40;
+static int           dynamicMaxPushTimes = 10;
 
 static std::uint64_t lastDebugTick   = 0;
 static std::uint64_t lastCleanupTick = 0;
@@ -95,7 +99,10 @@ LL_TYPE_INSTANCE_HOOK(
                 lastDebugTick = currentTick;
 
                 logger().info(
-                    "[Debug] processed={}, cooldownSkipped={}, throttleSkipped={}, prioritized={}, cacheSize={}",
+                    "[Debug] dynamicMaxPerTick={}, dynamicMaxPushTimes={}, processed={}, "
+                    "cooldownSkipped={}, throttleSkipped={}, prioritized={}, cacheSize={}",
+                    dynamicMaxPerTick,
+                    dynamicMaxPushTimes,
                     gStats.totalProcessed,
                     gStats.totalCooldownSkipped,
                     gStats.totalThrottleSkipped,
@@ -125,8 +132,8 @@ LL_TYPE_INSTANCE_HOOK(
         (currentTick - state.pendingSince >=
             static_cast<std::uint64_t>(config.priorityAfterTicks));
 
-    const int normalLimit    = config.maxPerTick - config.reservedSlots;
-    const int effectiveLimit = isPrioritized ? config.maxPerTick : normalLimit;
+    const int normalLimit    = dynamicMaxPerTick - config.reservedSlots;
+    const int effectiveLimit = isPrioritized ? dynamicMaxPerTick : normalLimit;
 
     if (processedThisTick >= effectiveLimit) {
         if (!isWaiting) {
@@ -164,7 +171,6 @@ LL_TYPE_INSTANCE_HOOK(
         return origin(owner, vec);
     }
 
-    // 修正：ZERO 是函数
     if (vec == Vec3::ZERO()) {
         return;
     }
@@ -183,7 +189,7 @@ LL_TYPE_INSTANCE_HOOK(
     Actor& other,
     bool   pushSelfOnly
 ) {
-    if (!config.pushOptEnabled || config.maxPushTimesPerTick < 0) {
+    if (!config.pushOptEnabled) {
         return origin(owner, other, pushSelfOnly);
     }
 
@@ -193,7 +199,7 @@ LL_TYPE_INSTANCE_HOOK(
 
     auto it = pushedEntityTimes.find(&owner);
     if (it != pushedEntityTimes.end()) {
-        if (it->second >= config.maxPushTimesPerTick) {
+        if (it->second >= dynamicMaxPushTimes) {
             return;
         }
         ++it->second;
@@ -204,7 +210,7 @@ LL_TYPE_INSTANCE_HOOK(
     origin(owner, other, pushSelfOnly);
 }
 
-// ── Level::tick Hook：每 tick 清理推挤计数 ────────────────
+// ── Level::tick Hook：测量耗时并动态调整 ─────────────────
 LL_TYPE_INSTANCE_HOOK(
     LevelTickHook,
     ll::memory::HookPriority::Normal,
@@ -212,8 +218,23 @@ LL_TYPE_INSTANCE_HOOK(
     &Level::$tick,
     void
 ) {
+    auto tickStart = std::chrono::steady_clock::now();
     origin();
     pushedEntityTimes.clear();
+
+    if (!config.enabled) return;
+
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - tickStart
+    ).count();
+
+    if (elapsed > config.targetTickMs) {
+        dynamicMaxPerTick   = std::max(0, dynamicMaxPerTick - config.maxPerTickStep);
+        dynamicMaxPushTimes = std::max(1, dynamicMaxPushTimes - config.pushTimesStep);
+    } else {
+        dynamicMaxPerTick   += config.maxPerTickStep;
+        dynamicMaxPushTimes += config.pushTimesStep;
+    }
 }
 
 // ── 注册 / 注销 ───────────────────────────────────────────
@@ -250,27 +271,34 @@ bool PluginImpl::load() {
 }
 
 bool PluginImpl::enable() {
-    if (config.reservedSlots >= config.maxPerTick) {
+    dynamicMaxPerTick   = config.maxPerTickStep * 10;
+    dynamicMaxPushTimes = config.pushTimesStep * 10;
+
+    if (config.reservedSlots >= dynamicMaxPerTick) {
         logger().warn(
-            "reservedSlots({}) >= maxPerTick({}), resetting to half.",
+            "reservedSlots({}) >= initial dynamicMaxPerTick({}), resetting to half.",
             config.reservedSlots,
-            config.maxPerTick
+            dynamicMaxPerTick
         );
-        config.reservedSlots = config.maxPerTick / 2;
+        config.reservedSlots = dynamicMaxPerTick / 2;
     }
 
     registerHooks();
 
     logger().info(
-        "Enabled. maxPerTick={}, cooldownTicks={}, reservedSlots={}, priorityAfterTicks={}, "
-        "pushOpt={}, disableVec0Push={}, maxPushTimesPerTick={}, debug={}",
-        config.maxPerTick,
+        "Enabled. initMaxPerTick={}, initMaxPushTimes={}, targetTickMs={}, "
+        "maxPerTickStep={}, pushTimesStep={}, cooldownTicks={}, reservedSlots={}, "
+        "priorityAfterTicks={}, pushOpt={}, disableVec0Push={}, debug={}",
+        dynamicMaxPerTick,
+        dynamicMaxPushTimes,
+        config.targetTickMs,
+        config.maxPerTickStep,
+        config.pushTimesStep,
         config.cooldownTicks,
         config.reservedSlots,
         config.priorityAfterTicks,
         config.pushOptEnabled,
         config.disableVec0Push,
-        config.maxPushTimesPerTick,
         config.debug
     );
 
