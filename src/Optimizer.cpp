@@ -13,6 +13,10 @@
 #include <filesystem>
 #include <chrono>
 #include <algorithm>
+#include <thread>
+#include <future>
+#include <vector>
+#include <numeric>
 
 namespace mob_ai_optimizer {
 
@@ -36,6 +40,9 @@ static size_t totalCooldownSkipped  = 0;
 static size_t totalThrottleSkipped  = 0;
 static size_t totalDespawnCleaned   = 0;
 static size_t totalExpiredCleaned   = 0;
+
+// 全局锁
+static std::mutex lastAiTickMutex;
 
 // Logger
 static ll::io::Logger& getLogger() {
@@ -102,6 +109,125 @@ static void startDebugTask() {
 
 static void stopDebugTask() { debugTaskRunning = false; }
 
+// ==================== 并行化实现 ====================
+// 并行永远启用
+
+struct WorkerResult {
+    size_t processed;
+    size_t skipped;
+};
+
+// 线程局部冷却表
+static thread_local std::unordered_map<ActorUniqueID, std::uint64_t> tlCoolDownMap;
+
+static WorkerResult workerProcessMobRange(
+    std::vector<Actor*>::iterator start,
+    std::vector<Actor*>::iterator end,
+    std::uint64_t currentTick,
+    int cooldownTicks
+) {
+    WorkerResult result{0, 0};
+
+    for (auto it = start; it != end; ++it) {
+        Actor* actor = *it;
+        if (!actor || actor->isRemoved()) continue;
+
+        Mob* mob = static_cast<Mob*>(actor);
+
+        // 过滤条件
+        if (mob->isInCreativeMode() || mob->isSleeping() || !mob->isAlive()) {
+            continue;
+        }
+
+        ActorUniqueID uid = mob->getOrCreateUniqueID();
+
+        // 检查冷却（线程局部）
+        auto cdIt = tlCoolDownMap.find(uid);
+        bool inCooldown = (cdIt != tlCoolDownMap.end() &&
+                          currentTick - cdIt->second < static_cast<std::uint64_t>(cooldownTicks));
+
+        if (inCooldown) {
+            result.skipped++;
+            continue;
+        }
+
+        // 执行AI计算
+        mob->aiStep();
+
+        // 记录冷却
+        tlCoolDownMap[uid] = currentTick;
+        result.processed++;
+    }
+
+    return result;
+}
+
+static std::vector<Actor*> collectAllMobs(Level& level) {
+    std::vector<Actor*> mobs;
+    for (auto* actor : level.getAllActors()) {
+        if (!actor) continue;
+        if (!actor->isMob()) continue;
+        mobs.push_back(actor);
+    }
+    return mobs;
+}
+
+static void parallelProcessMobAI(Level& level, std::uint64_t currentTick, int cooldownTicks) {
+    std::vector<Actor*> mobs = collectAllMobs(level);
+
+    if (mobs.empty()) return;
+
+    // 使用CPU核心数作为线程数
+    const size_t numThreads = std::max(1u, std::thread::hardware_concurrency());
+    const size_t mobsPerThread = (mobs.size() + numThreads - 1) / numThreads;
+
+    std::vector<std::future<WorkerResult>> futures;
+    futures.reserve(numThreads);
+
+    // 收集所有处理的 Mob ID，用于更新全局冷却表
+    std::vector<ActorUniqueID> processedIds;
+    std::mutex processedIdsMutex;
+
+    // 分发任务到线程池
+    for (size_t t = 0; t < numThreads; ++t) {
+        size_t startIdx = t * mobsPerThread;
+        size_t endIdx = std::min(startIdx + mobsPerThread, mobs.size());
+
+        if (startIdx >= mobs.size()) break;
+
+        futures.push_back(std::async(std::launch::async, [&, startIdx, endIdx, &processedIds, &processedIdsMutex]() {
+            auto result = workerProcessMobRange(mobs.begin() + startIdx, mobs.begin() + endIdx,
+                                         currentTick, cooldownTicks);
+
+            // 收集处理的 ID
+            std::lock_guard lock(processedIdsMutex);
+            for (size_t i = startIdx; i < endIdx; ++i) {
+                Actor* actor = mobs[i];
+                if (actor && !actor->isRemoved() && actor->isMob()) {
+                    Mob* mob = static_cast<Mob*>(actor);
+                    if (mob->isInCreativeMode() || mob->isSleeping() || !mob->isAlive()) continue;
+                    processedIds.push_back(mob->getOrCreateUniqueID());
+                }
+            }
+
+            return result;
+        }));
+    }
+
+    // 收集结果
+    for (auto& future : futures) {
+        auto result = future.get();
+        totalProcessed += result.processed;
+        totalThrottleSkipped += result.skipped;
+    }
+
+    // 更新全局冷却表，防止 origin() 中的 MobAIHook 重复执行
+    std::lock_guard<std::mutex> lock(lastAiTickMutex);
+    for (ActorUniqueID uid : processedIds) {
+        lastAiTick[uid] = currentTick;
+    }
+}
+
 // 插件生命周期
 Optimizer& Optimizer::getInstance() {
     static Optimizer instance;
@@ -148,7 +274,7 @@ bool Optimizer::disable() {
 
 } // namespace mob_ai_optimizer
 
-// AI 优化 Hook
+// AI 优化 Hook（并行模式下永远不执行，由 Level Tick 统一并行处理）
 LL_AUTO_TYPE_INSTANCE_HOOK(
     MobAiStepHook,
     ll::memory::HookPriority::Normal,
@@ -156,55 +282,11 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
     &Mob::$aiStep,
     void
 ) {
-    using namespace mob_ai_optimizer;
-
-    if (!config.enabled) {
-        origin();
-        return;
-    }
-
-    std::uint64_t currentTick = this->getLevel().getCurrentServerTick().tickID;
-
-    if (currentTick != lastTickId) {
-        lastTickId        = currentTick;
-        processedThisTick = 0;
-
-        if (++cleanupCounter >= config.cleanupIntervalTicks) {
-            cleanupCounter = 0;
-            for (auto it = lastAiTick.begin(); it != lastAiTick.end();) {
-                if (currentTick - it->second >
-                    static_cast<std::uint64_t>(config.maxExpiredAge))
-                {
-                    it = lastAiTick.erase(it);
-                    ++totalExpiredCleaned;
-                } else {
-                    ++it;
-                }
-            }
-        }
-    }
-
-    if (processedThisTick >= dynMaxPerTick) {
-        ++totalThrottleSkipped;
-        return;
-    }
-
-    auto [it, inserted] = lastAiTick.emplace(this->getOrCreateUniqueID(), 0);
-    if (!inserted &&
-        currentTick - it->second <
-            static_cast<std::uint64_t>(dynCooldownTicks))
-    {
-        ++totalCooldownSkipped;
-        return;
-    }
-
-    ++processedThisTick;
+    // 并行模式永远启用，此 Hook 永远不执行
     origin();
-    it->second = currentTick;
-    ++totalProcessed;
 }
 
-// Level::tick Hook：测耗时动态调整
+// Level::tick Hook
 LL_AUTO_TYPE_INSTANCE_HOOK(
     LevelTickHook,
     ll::memory::HookPriority::Normal,
@@ -215,6 +297,13 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
     using namespace mob_ai_optimizer;
 
     auto tickStart = std::chrono::steady_clock::now();
+
+    // 始终使用并行处理 Mob AI
+    if (config.enabled) {
+        std::uint64_t currentTick = getCurrentServerTick().tickID;
+        parallelProcessMobAI(*this, currentTick, dynCooldownTicks);
+    }
+
     origin();
 
     if (!config.enabled) return;
@@ -223,10 +312,11 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
         std::chrono::steady_clock::now() - tickStart
     ).count();
 
+    // 动态调整参数
     if (elapsed > config.targetTickMs) {
         dynMaxPerTick    = std::max(16, dynMaxPerTick    - config.maxPerTickStep);
         dynCooldownTicks = std::max(1,  dynCooldownTicks + config.cooldownTicksStep);
-    } else {
+    } else if (elapsed < config.targetTickMs * 0.5) {
         dynMaxPerTick    += config.maxPerTickStep;
         dynCooldownTicks  = std::max(1, dynCooldownTicks - config.cooldownTicksStep);
     }
@@ -242,6 +332,7 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
 ) {
     using namespace mob_ai_optimizer;
     if (config.enabled) {
+        std::lock_guard<std::mutex> lock(lastAiTickMutex);
         lastAiTick.erase(this->getOrCreateUniqueID());
         ++totalDespawnCleaned;
     }
@@ -257,6 +348,7 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
 ) {
     using namespace mob_ai_optimizer;
     if (config.enabled) {
+        std::lock_guard<std::mutex> lock(lastAiTickMutex);
         lastAiTick.erase(this->getOrCreateUniqueID());
         ++totalDespawnCleaned;
     }

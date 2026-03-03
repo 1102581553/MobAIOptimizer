@@ -8,7 +8,7 @@
 namespace mob_ai_optimizer {
 
 struct Config {
-    int  version = 2;
+    int  version = 3;
     bool enabled = true;
     bool debug   = false;
 
