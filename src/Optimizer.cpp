@@ -16,7 +16,6 @@
 #include <thread>
 #include <future>
 #include <vector>
-#include <numeric>
 
 namespace mob_ai_optimizer {
 
@@ -110,7 +109,6 @@ static void startDebugTask() {
 static void stopDebugTask() { debugTaskRunning = false; }
 
 // ==================== 并行化实现 ====================
-// 并行永远启用
 
 struct WorkerResult {
     size_t processed;
@@ -130,9 +128,10 @@ static WorkerResult workerProcessMobRange(
 
     for (auto it = start; it != end; ++it) {
         Actor* actor = *it;
-        if (!actor || actor->isDead()) continue;
+        if (!actor) continue;
 
         Mob* mob = static_cast<Mob*>(actor);
+        if (!mob) continue;
 
         ActorUniqueID uid = mob->getOrCreateUniqueID();
 
@@ -159,10 +158,11 @@ static WorkerResult workerProcessMobRange(
 
 static std::vector<Actor*> collectAllMobs(Level& level) {
     std::vector<Actor*> mobs;
-    auto& registry = level.getActorRegistry();
-    for (auto& [uid, actor] : registry) {
-        if (!actor) continue;
-        if (actor->isMob()) {
+    // 使用 Level 的 getRuntimeActorTable 获取所有 Actor
+    auto& runtimeTable = level.getRuntimeActorTable();
+    for (auto& pair : runtimeTable) {
+        Actor* actor = pair.second;
+        if (actor && actor->isMob()) {
             mobs.push_back(actor);
         }
     }
