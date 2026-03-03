@@ -130,14 +130,9 @@ static WorkerResult workerProcessMobRange(
 
     for (auto it = start; it != end; ++it) {
         Actor* actor = *it;
-        if (!actor || actor->isRemoved()) continue;
+        if (!actor || actor->isDead()) continue;
 
         Mob* mob = static_cast<Mob*>(actor);
-
-        // 过滤条件
-        if (mob->isInCreativeMode() || mob->isSleeping() || !mob->isAlive()) {
-            continue;
-        }
 
         ActorUniqueID uid = mob->getOrCreateUniqueID();
 
@@ -164,10 +159,12 @@ static WorkerResult workerProcessMobRange(
 
 static std::vector<Actor*> collectAllMobs(Level& level) {
     std::vector<Actor*> mobs;
-    for (auto* actor : level.getAllActors()) {
+    auto& registry = level.getActorRegistry();
+    for (auto& [uid, actor] : registry) {
         if (!actor) continue;
-        if (!actor->isMob()) continue;
-        mobs.push_back(actor);
+        if (actor->isMob()) {
+            mobs.push_back(actor);
+        }
     }
     return mobs;
 }
@@ -195,7 +192,7 @@ static void parallelProcessMobAI(Level& level, std::uint64_t currentTick, int co
 
         if (startIdx >= mobs.size()) break;
 
-        futures.push_back(std::async(std::launch::async, [&, startIdx, endIdx, &processedIds, &processedIdsMutex]() {
+        futures.push_back(std::async(std::launch::async, [=, &processedIds, &processedIdsMutex]() {
             auto result = workerProcessMobRange(mobs.begin() + startIdx, mobs.begin() + endIdx,
                                          currentTick, cooldownTicks);
 
@@ -203,10 +200,8 @@ static void parallelProcessMobAI(Level& level, std::uint64_t currentTick, int co
             std::lock_guard lock(processedIdsMutex);
             for (size_t i = startIdx; i < endIdx; ++i) {
                 Actor* actor = mobs[i];
-                if (actor && !actor->isRemoved() && actor->isMob()) {
-                    Mob* mob = static_cast<Mob*>(actor);
-                    if (mob->isInCreativeMode() || mob->isSleeping() || !mob->isAlive()) continue;
-                    processedIds.push_back(mob->getOrCreateUniqueID());
+                if (actor && actor->isMob()) {
+                    processedIds.push_back(actor->getOrCreateUniqueID());
                 }
             }
 
