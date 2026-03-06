@@ -7,8 +7,7 @@
 #include <ll/api/thread/ServerThreadExecutor.h>
 #include <mc/world/actor/Mob.h>
 #include <mc/world/actor/Actor.h>
-#include <mc/world/actor/ActorType.h>
-#include <mc/world/actor/ActorCategory.h>          // 新增：用于 hasCategory
+#include <mc/world/actor/ActorCategory.h>
 #include <mc/world/level/Level.h>
 #include <mc/world/level/Tick.h>
 #include <filesystem>
@@ -17,6 +16,7 @@
 #include <thread>
 #include <future>
 #include <vector>
+#include <windows.h>  // 用于 SEH 异常处理
 
 namespace mob_ai_optimizer {
 
@@ -92,17 +92,16 @@ static WorkerResult workerProcessMobRange(
         Actor* actor = *it;
         if (!actor) continue;
 
-        // 使用 hasCategory 判断（修复点）
         if (!actor->hasCategory(::ActorCategory::Mob)) continue;
         Mob* mob = static_cast<Mob*>(actor);
 
-        try {
+        // 使用 SEH 捕获所有异常（包括访问违例和 C++ 异常）
+        __try {
             mob->aiStep();
             result.processed++;
-        } catch (const std::exception& e) {
-            getLogger().error("Exception in aiStep: {}", e.what());
-        } catch (...) {
-            getLogger().error("Unknown exception in aiStep");
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            DWORD code = GetExceptionCode();
+            getLogger().error("SEH exception in aiStep for mob {}: code 0x{:X}", (uint64_t)mob, code);
         }
     }
 
@@ -117,9 +116,7 @@ static std::vector<Actor*> collectAllMobs(Level& level) {
 
     for (Actor* actor : actors) {
         if (!actor) continue;
-        // 修复点：使用 hasCategory 而非 isType
-        bool isMob = actor->hasCategory(::ActorCategory::Mob);
-        if (isMob) {
+        if (actor->hasCategory(::ActorCategory::Mob)) {
             getLogger().info("Found Mob: {}", (uint64_t)actor);
             mobs.push_back(actor);
         }
@@ -162,6 +159,8 @@ static void parallelProcessMobAI(Level& level) {
             tickProcessed += result.processed;
         } catch (const std::exception& e) {
             getLogger().error("Future get exception: {}", e.what());
+        } catch (...) {
+            getLogger().error("Future get unknown exception");
         }
     }
 
