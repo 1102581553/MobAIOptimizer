@@ -87,6 +87,22 @@ struct WorkerResult {
     size_t processed;
 };
 
+// 纯 C 风格的 SEH 安全调用，不包含任何 C++ 对象
+struct SafeAiStepResult {
+    bool success;
+    DWORD exceptionCode;
+};
+
+static SafeAiStepResult safeAiStep(Mob* mob) {
+    __try {
+        mob->aiStep();
+        return {true, 0};
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        DWORD code = GetExceptionCode();
+        return {false, code};
+    }
+}
+
 static WorkerResult workerProcessMobRange(
     std::vector<Actor*>::iterator start,
     std::vector<Actor*>::iterator end
@@ -101,7 +117,7 @@ static WorkerResult workerProcessMobRange(
         Mob* mob = static_cast<Mob*>(actor);
         ActorUniqueID uid = mob->getOrCreateUniqueID();
 
-        // 检查黑名单：如果该生物 ID 已崩溃过，直接跳过
+        // 检查黑名单（使用 C++ 锁，但已无 __try 混合）
         {
             std::lock_guard<std::mutex> lock(crashedIdsMutex);
             if (crashedIds.find(uid) != crashedIds.end()) {
@@ -109,18 +125,17 @@ static WorkerResult workerProcessMobRange(
             }
         }
 
-        __try {
-            mob->aiStep();
+        auto safeResult = safeAiStep(mob);
+        if (safeResult.success) {
             result.processed++;
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            DWORD code = GetExceptionCode();
-            getLogger().error("SEH exception in aiStep for mob {} (UID {}): code 0x{:X} - added to blacklist",
-                              (uint64_t)mob, uid.rawID, code);
-            // 将崩溃的生物 ID 加入黑名单
+        } else {
+            // 加入黑名单
             {
                 std::lock_guard<std::mutex> lock(crashedIdsMutex);
                 crashedIds.insert(uid);
             }
+            getLogger().error("SEH exception in aiStep for mob {} (UID {}): code 0x{:X} - added to blacklist",
+                              (uint64_t)mob, uid.rawID, safeResult.exceptionCode);
         }
     }
 
