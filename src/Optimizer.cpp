@@ -7,7 +7,7 @@
 #include <ll/api/thread/ServerThreadExecutor.h>
 #include <mc/world/actor/Mob.h>
 #include <mc/world/actor/Actor.h>
-#include <mc/world/actor/ActorType.h>          // 新增：用于 isType 判断
+#include <mc/world/actor/ActorType.h>          // 用于 isType 判断
 #include <mc/world/level/Level.h>
 #include <mc/world/level/Tick.h>
 #include <mc/legacy/ActorUniqueID.h>
@@ -20,29 +20,19 @@
 
 namespace mob_ai_optimizer {
 
-// 全局
+// 全局配置
 static Config config;
 static std::shared_ptr<ll::io::Logger> log;
 static bool debugTaskRunning = false;
 
+// 冷却记录（全局，用于清理钩子）
 std::unordered_map<ActorUniqueID, std::uint64_t> lastAiTick;
-int           processedThisTick = 0;
-std::uint64_t lastTickId        = 0;
-int           cleanupCounter    = 0;
-
-// 动态参数
-static int dynMaxPerTick    = 40;
-static int dynCooldownTicks = 4;
+static std::mutex lastAiTickMutex;
 
 // 调试统计
 static size_t totalProcessed        = 0;
 static size_t totalCooldownSkipped  = 0;
-static size_t totalThrottleSkipped  = 0;
 static size_t totalDespawnCleaned   = 0;
-static size_t totalExpiredCleaned   = 0;
-
-// 全局锁
-static std::mutex lastAiTickMutex;
 
 // Logger
 static ll::io::Logger& getLogger() {
@@ -52,18 +42,14 @@ static ll::io::Logger& getLogger() {
     return *log;
 }
 
-// Config
 Config& getConfig() { return config; }
 
 bool loadConfig() {
-    auto path   = Optimizer::getInstance().getSelf().getConfigDir() / "config.json";
+    auto path = Optimizer::getInstance().getSelf().getConfigDir() / "config.json";
     bool loaded = ll::config::loadConfig(config, path);
-    if (config.cleanupIntervalTicks < 1)  config.cleanupIntervalTicks = 100;
-    if (config.maxExpiredAge        < 1)  config.maxExpiredAge        = 600;
-    if (config.initialMapReserve   == 0)  config.initialMapReserve    = 1000;
-    if (config.maxPerTickStep       < 1)  config.maxPerTickStep       = 1;
-    if (config.cooldownTicksStep    < 1)  config.cooldownTicksStep    = 1;
-    if (config.targetTickMs         < 1)  config.targetTickMs         = 50;
+    // 确保配置有效性
+    if (config.aiCooldownTicks < 1) config.aiCooldownTicks = 4;
+    if (config.initialMapReserve == 0) config.initialMapReserve = 1000;
     return loaded;
 }
 
@@ -72,12 +58,13 @@ bool saveConfig() {
     return ll::config::saveConfig(config, path);
 }
 
-// Debug
+// 调试统计重置
 static void resetStats() {
-    totalProcessed = totalCooldownSkipped = totalThrottleSkipped = 0;
-    totalDespawnCleaned = totalExpiredCleaned = 0;
+    totalProcessed = totalCooldownSkipped = 0;
+    totalDespawnCleaned = 0;
 }
 
+// 调试任务（每5秒输出统计）
 static void startDebugTask() {
     if (debugTaskRunning) return;
     debugTaskRunning = true;
@@ -87,18 +74,12 @@ static void startDebugTask() {
             co_await std::chrono::seconds(5);
             ll::thread::ServerThreadExecutor::getDefault().execute([] {
                 if (!config.debug) return;
-                size_t total = totalProcessed + totalCooldownSkipped + totalThrottleSkipped;
-                double skipRate = total > 0
-                    ? (100.0 * (totalCooldownSkipped + totalThrottleSkipped) / total)
-                    : 0.0;
+                size_t total = totalProcessed + totalCooldownSkipped;
+                double skipRate = total > 0 ? (100.0 * totalCooldownSkipped / total) : 0.0;
                 getLogger().info(
-                    "AI stats (5s): dynMaxPerTick={}, dynCooldown={} | "
-                    "processed={}, cooldownSkip={}, throttleSkip={}, "
-                    "skipRate={:.1f}%, despawnClean={}, expiredClean={}, tracked={}",
-                    dynMaxPerTick, dynCooldownTicks,
-                    totalProcessed, totalCooldownSkipped, totalThrottleSkipped,
-                    skipRate, totalDespawnCleaned, totalExpiredCleaned,
-                    lastAiTick.size()
+                    "AI stats (5s): processed={}, cooldownSkip={}, skipRate={:.1f}%, despawnClean={}, tracked={}",
+                    totalProcessed, totalCooldownSkipped, skipRate,
+                    totalDespawnCleaned, lastAiTick.size()
                 );
                 resetStats();
             });
@@ -109,7 +90,7 @@ static void startDebugTask() {
 
 static void stopDebugTask() { debugTaskRunning = false; }
 
-// ==================== 并行化实现 ====================
+// ==================== 并行处理 ====================
 
 struct WorkerResult {
     size_t processed;
@@ -131,8 +112,9 @@ static WorkerResult workerProcessMobRange(
         Actor* actor = *it;
         if (!actor) continue;
 
+        // 确保是 Mob
+        if (!actor->isType(::ActorType::Mob)) continue;
         Mob* mob = static_cast<Mob*>(actor);
-        if (!mob) continue;
 
         ActorUniqueID uid = mob->getOrCreateUniqueID();
 
@@ -146,7 +128,7 @@ static WorkerResult workerProcessMobRange(
             continue;
         }
 
-        // 执行AI计算
+        // 执行 AI
         mob->aiStep();
 
         // 记录冷却
@@ -157,13 +139,11 @@ static WorkerResult workerProcessMobRange(
     return result;
 }
 
-// ===== 修复点1：使用 getRuntimeActorList 获取所有 Actor =====
+// 获取所有生物（使用 Level::getRuntimeActorList）
 static std::vector<Actor*> collectAllMobs(Level& level) {
     std::vector<Actor*> mobs;
-    // 使用 Level::getRuntimeActorList() 获取所有 Actor 的快照
     auto actors = level.getRuntimeActorList();
     for (Actor* actor : actors) {
-        // 使用 isType(ActorType::Mob) 判断是否为生物
         if (actor && actor->isType(::ActorType::Mob)) {
             mobs.push_back(actor);
         }
@@ -173,53 +153,46 @@ static std::vector<Actor*> collectAllMobs(Level& level) {
 
 static void parallelProcessMobAI(Level& level, std::uint64_t currentTick, int cooldownTicks) {
     std::vector<Actor*> mobs = collectAllMobs(level);
-
     if (mobs.empty()) return;
 
-    // 使用CPU核心数作为线程数
     const size_t numThreads = std::max(1u, std::thread::hardware_concurrency());
     const size_t mobsPerThread = (mobs.size() + numThreads - 1) / numThreads;
 
     std::vector<std::future<WorkerResult>> futures;
     futures.reserve(numThreads);
 
-    // 收集所有处理的 Mob ID，用于更新全局冷却表
     std::vector<ActorUniqueID> processedIds;
     std::mutex processedIdsMutex;
 
-    // 分发任务到线程池
     for (size_t t = 0; t < numThreads; ++t) {
         size_t startIdx = t * mobsPerThread;
         size_t endIdx = std::min(startIdx + mobsPerThread, mobs.size());
-
         if (startIdx >= mobs.size()) break;
 
-        // ===== 修复点2：按引用捕获 mobs，确保迭代器类型正确 =====
+        // 按引用捕获 mobs（确保迭代器类型正确）
         futures.push_back(std::async(std::launch::async, [&mobs, startIdx, endIdx, currentTick, cooldownTicks, &processedIds, &processedIdsMutex]() {
             auto result = workerProcessMobRange(mobs.begin() + startIdx, mobs.begin() + endIdx,
-                                         currentTick, cooldownTicks);
-
-            // 收集处理的 ID
+                                                 currentTick, cooldownTicks);
+            // 收集 ID
             std::lock_guard lock(processedIdsMutex);
             for (size_t i = startIdx; i < endIdx; ++i) {
                 Actor* actor = mobs[i];
-                if (actor && actor->isType(::ActorType::Mob)) {  // 再次确保类型安全
+                if (actor && actor->isType(::ActorType::Mob)) {
                     processedIds.push_back(actor->getOrCreateUniqueID());
                 }
             }
-
             return result;
         }));
     }
 
-    // 收集结果
+    // 汇总结果
     for (auto& future : futures) {
         auto result = future.get();
         totalProcessed += result.processed;
-        totalThrottleSkipped += result.skipped;
+        totalCooldownSkipped += result.skipped;
     }
 
-    // 更新全局冷却表，防止 origin() 中的 MobAIHook 重复执行
+    // 更新全局冷却表（供清理钩子使用）
     std::lock_guard<std::mutex> lock(lastAiTickMutex);
     for (ActorUniqueID uid : processedIds) {
         lastAiTick[uid] = currentTick;
@@ -239,32 +212,20 @@ bool Optimizer::load() {
         saveConfig();
     }
     lastAiTick.reserve(config.initialMapReserve);
-    getLogger().info(
-        "Loaded. enabled={}, debug={}, targetTickMs={}, maxPerTickStep={}, cooldownTicksStep={}",
-        config.enabled, config.debug,
-        config.targetTickMs, config.maxPerTickStep, config.cooldownTicksStep
-    );
+    getLogger().info("Loaded. enabled={}, debug={}, aiCooldownTicks={}",
+                     config.enabled, config.debug, config.aiCooldownTicks);
     return true;
 }
 
 bool Optimizer::enable() {
-    dynMaxPerTick    = config.maxPerTickStep    * 10;
-    dynCooldownTicks = config.cooldownTicksStep * 4;
-
     if (config.debug) startDebugTask();
-    getLogger().info(
-        "Enabled. initMaxPerTick={}, initCooldown={}",
-        dynMaxPerTick, dynCooldownTicks
-    );
+    getLogger().info("Enabled.");
     return true;
 }
 
 bool Optimizer::disable() {
     stopDebugTask();
     lastAiTick.clear();
-    processedThisTick = 0;
-    lastTickId        = 0;
-    cleanupCounter    = 0;
     resetStats();
     getLogger().info("Disabled");
     return true;
@@ -272,7 +233,9 @@ bool Optimizer::disable() {
 
 } // namespace mob_ai_optimizer
 
-// ===== 修复点3：AI 优化 Hook，插件启用时直接返回 =====
+// ==================== 钩子 ====================
+
+// 禁用原版 AI（插件启用时直接返回）
 LL_AUTO_TYPE_INSTANCE_HOOK(
     MobAiStepHook,
     ll::memory::HookPriority::Normal,
@@ -282,12 +245,12 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
 ) {
     using namespace mob_ai_optimizer;
     if (config.enabled) {
-        return; // 禁用原版 AI 调用，由并行任务处理
+        return; // 由并行任务处理，禁止原版调用
     }
     origin();
 }
 
-// Level::tick Hook
+// Level::tick 钩子：在 tick 开始时并行处理 AI
 LL_AUTO_TYPE_INSTANCE_HOOK(
     LevelTickHook,
     ll::memory::HookPriority::Normal,
@@ -297,33 +260,15 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
 ) {
     using namespace mob_ai_optimizer;
 
-    auto tickStart = std::chrono::steady_clock::now();
-
-    // 始终使用并行处理 Mob AI
     if (config.enabled) {
         std::uint64_t currentTick = getCurrentServerTick().tickID;
-        parallelProcessMobAI(*this, currentTick, dynCooldownTicks);
+        parallelProcessMobAI(*this, currentTick, config.aiCooldownTicks);
     }
 
-    origin();
-
-    if (!config.enabled) return;
-
-    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - tickStart
-    ).count();
-
-    // 动态调整参数
-    if (elapsed > config.targetTickMs) {
-        dynMaxPerTick    = std::max(16, dynMaxPerTick    - config.maxPerTickStep);
-        dynCooldownTicks = std::max(1,  dynCooldownTicks + config.cooldownTicksStep);
-    } else if (elapsed < config.targetTickMs * 0.5) {
-        dynMaxPerTick    += config.maxPerTickStep;
-        dynCooldownTicks  = std::max(1, dynCooldownTicks - config.cooldownTicksStep);
-    }
+    origin(); // 执行原版 tick
 }
 
-// 清理 Hook
+// 清理钩子：生物消失时从全局冷却表中移除
 LL_AUTO_TYPE_INSTANCE_HOOK(
     ActorDespawnHook,
     ll::memory::HookPriority::Normal,
