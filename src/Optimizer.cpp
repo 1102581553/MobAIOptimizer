@@ -111,25 +111,22 @@ static std::vector<Actor*> collectAllMobs(Level& level) {
     std::vector<Actor*> mobs;
     auto actors = level.getRuntimeActorList();
     
-    if (config.debug) {
-        getLogger().debug("getRuntimeActorList returned {} actors", actors.size());
-    }
+    // 始终输出，便于诊断
+    getLogger().info("getRuntimeActorList returned {} actors", actors.size());
 
     for (Actor* actor : actors) {
         if (!actor) continue;
         bool isMob = actor->isType(::ActorType::Mob);
-        if (config.debug && isMob) {
-            // 可以打印一些生物信息，如类型ID或名称
-            getLogger().debug("Found Mob: {}", (uint64_t)actor);
+        // 如果判断为生物，打印指针（可根据需要添加更多信息）
+        if (isMob) {
+            getLogger().info("Found Mob: {}", (uint64_t)actor);
         }
         if (isMob) {
             mobs.push_back(actor);
         }
     }
 
-    if (config.debug) {
-        getLogger().debug("collectAllMobs found {} mobs", mobs.size());
-    }
+    getLogger().info("collectAllMobs found {} mobs", mobs.size());
     lastMobCount = mobs.size(); // 记录本次找到的生物数量
     return mobs;
 }
@@ -137,16 +134,14 @@ static std::vector<Actor*> collectAllMobs(Level& level) {
 static void parallelProcessMobAI(Level& level) {
     std::vector<Actor*> mobs = collectAllMobs(level);
     if (mobs.empty()) {
-        if (config.debug) getLogger().debug("No mobs to process");
+        getLogger().info("No mobs to process");
         return;
     }
 
     const size_t numThreads = std::max(1u, std::thread::hardware_concurrency());
     const size_t mobsPerThread = (mobs.size() + numThreads - 1) / numThreads;
 
-    if (config.debug) {
-        getLogger().debug("Processing {} mobs with {} threads", mobs.size(), numThreads);
-    }
+    getLogger().info("Processing {} mobs with {} threads", mobs.size(), numThreads);
 
     std::vector<std::future<WorkerResult>> futures;
     futures.reserve(numThreads);
@@ -174,9 +169,7 @@ static void parallelProcessMobAI(Level& level) {
     totalProcessed += tickProcessed;
     totalTicks++;
 
-    if (config.debug) {
-        getLogger().debug("Processed {} mobs this tick", tickProcessed);
-    }
+    getLogger().info("Processed {} mobs this tick", tickProcessed);
 }
 
 // 插件生命周期
