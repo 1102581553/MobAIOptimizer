@@ -8,6 +8,7 @@
 #include <mc/world/actor/Mob.h>
 #include <mc/world/actor/Actor.h>
 #include <mc/world/actor/ActorType.h>
+#include <mc/world/actor/ActorCategory.h>          // 新增：用于 hasCategory
 #include <mc/world/level/Level.h>
 #include <mc/world/level/Tick.h>
 #include <filesystem>
@@ -26,7 +27,7 @@ static bool debugTaskRunning = false;
 // 调试统计
 static size_t totalProcessed = 0;
 static size_t totalTicks = 0;
-static size_t lastMobCount = 0;          // 上次处理的生物数量
+static size_t lastMobCount = 0;
 
 static ll::io::Logger& getLogger() {
     if (!log) {
@@ -91,7 +92,8 @@ static WorkerResult workerProcessMobRange(
         Actor* actor = *it;
         if (!actor) continue;
 
-        if (!actor->isType(::ActorType::Mob)) continue;
+        // 使用 hasCategory 判断（修复点）
+        if (!actor->hasCategory(::ActorCategory::Mob)) continue;
         Mob* mob = static_cast<Mob*>(actor);
 
         try {
@@ -111,23 +113,20 @@ static std::vector<Actor*> collectAllMobs(Level& level) {
     std::vector<Actor*> mobs;
     auto actors = level.getRuntimeActorList();
     
-    // 始终输出，便于诊断
     getLogger().info("getRuntimeActorList returned {} actors", actors.size());
 
     for (Actor* actor : actors) {
         if (!actor) continue;
-        bool isMob = actor->isType(::ActorType::Mob);
-        // 如果判断为生物，打印指针（可根据需要添加更多信息）
+        // 修复点：使用 hasCategory 而非 isType
+        bool isMob = actor->hasCategory(::ActorCategory::Mob);
         if (isMob) {
             getLogger().info("Found Mob: {}", (uint64_t)actor);
-        }
-        if (isMob) {
             mobs.push_back(actor);
         }
     }
 
     getLogger().info("collectAllMobs found {} mobs", mobs.size());
-    lastMobCount = mobs.size(); // 记录本次找到的生物数量
+    lastMobCount = mobs.size();
     return mobs;
 }
 
