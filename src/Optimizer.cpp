@@ -7,6 +7,7 @@
 #include <ll/api/thread/ServerThreadExecutor.h>
 #include <mc/world/actor/Mob.h>
 #include <mc/world/actor/Actor.h>
+#include <mc/world/actor/ActorType.h>          // 新增：用于 isType 判断
 #include <mc/world/level/Level.h>
 #include <mc/world/level/Tick.h>
 #include <mc/legacy/ActorUniqueID.h>
@@ -156,13 +157,14 @@ static WorkerResult workerProcessMobRange(
     return result;
 }
 
+// ===== 修复点1：使用 getRuntimeActorList 获取所有 Actor =====
 static std::vector<Actor*> collectAllMobs(Level& level) {
     std::vector<Actor*> mobs;
-    // 使用 Level 的 getRuntimeActorTable 获取所有 Actor
-    auto& runtimeTable = level.getRuntimeActorTable();
-    for (auto& pair : runtimeTable) {
-        Actor* actor = pair.second;
-        if (actor && actor->isMob()) {
+    // 使用 Level::getRuntimeActorList() 获取所有 Actor 的快照
+    auto actors = level.getRuntimeActorList();
+    for (Actor* actor : actors) {
+        // 使用 isType(ActorType::Mob) 判断是否为生物
+        if (actor && actor->isType(::ActorType::Mob)) {
             mobs.push_back(actor);
         }
     }
@@ -192,7 +194,8 @@ static void parallelProcessMobAI(Level& level, std::uint64_t currentTick, int co
 
         if (startIdx >= mobs.size()) break;
 
-        futures.push_back(std::async(std::launch::async, [=, &processedIds, &processedIdsMutex]() {
+        // ===== 修复点2：按引用捕获 mobs，确保迭代器类型正确 =====
+        futures.push_back(std::async(std::launch::async, [&mobs, startIdx, endIdx, currentTick, cooldownTicks, &processedIds, &processedIdsMutex]() {
             auto result = workerProcessMobRange(mobs.begin() + startIdx, mobs.begin() + endIdx,
                                          currentTick, cooldownTicks);
 
@@ -200,7 +203,7 @@ static void parallelProcessMobAI(Level& level, std::uint64_t currentTick, int co
             std::lock_guard lock(processedIdsMutex);
             for (size_t i = startIdx; i < endIdx; ++i) {
                 Actor* actor = mobs[i];
-                if (actor && actor->isMob()) {
+                if (actor && actor->isType(::ActorType::Mob)) {  // 再次确保类型安全
                     processedIds.push_back(actor->getOrCreateUniqueID());
                 }
             }
@@ -269,7 +272,7 @@ bool Optimizer::disable() {
 
 } // namespace mob_ai_optimizer
 
-// AI 优化 Hook（并行模式下永远不执行，由 Level Tick 统一并行处理）
+// ===== 修复点3：AI 优化 Hook，插件启用时直接返回 =====
 LL_AUTO_TYPE_INSTANCE_HOOK(
     MobAiStepHook,
     ll::memory::HookPriority::Normal,
@@ -277,7 +280,10 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
     &Mob::$aiStep,
     void
 ) {
-    // 并行模式永远启用，此 Hook 永远不执行
+    using namespace mob_ai_optimizer;
+    if (config.enabled) {
+        return; // 禁用原版 AI 调用，由并行任务处理
+    }
     origin();
 }
 
