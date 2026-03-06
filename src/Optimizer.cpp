@@ -19,16 +19,15 @@
 
 namespace mob_ai_optimizer {
 
-// 全局配置
 static Config config;
 static std::shared_ptr<ll::io::Logger> log;
 static bool debugTaskRunning = false;
 
 // 调试统计
-static size_t totalProcessed = 0;          // 每 tick 处理的生物总数（累计）
-static size_t totalTicks = 0;              // 统计周期内的 tick 数
+static size_t totalProcessed = 0;
+static size_t totalTicks = 0;
+static size_t lastMobCount = 0;          // 上次处理的生物数量
 
-// Logger
 static ll::io::Logger& getLogger() {
     if (!log) {
         log = ll::io::LoggerRegistry::getInstance().getOrCreate("MobAIOptimizer");
@@ -48,13 +47,11 @@ bool saveConfig() {
     return ll::config::saveConfig(config, path);
 }
 
-// 调试统计重置
 static void resetStats() {
     totalProcessed = 0;
     totalTicks = 0;
 }
 
-// 调试任务（每5秒输出统计）
 static void startDebugTask() {
     if (debugTaskRunning) return;
     debugTaskRunning = true;
@@ -66,8 +63,8 @@ static void startDebugTask() {
                 if (!config.debug) return;
                 size_t avgPerTick = totalTicks > 0 ? totalProcessed / totalTicks : 0;
                 getLogger().info(
-                    "AI stats (5s): total processed={}, avg per tick={}",
-                    totalProcessed, avgPerTick
+                    "AI stats (5s): total processed={}, avg per tick={}, last mob count={}",
+                    totalProcessed, avgPerTick, lastMobCount
                 );
                 resetStats();
             });
@@ -78,7 +75,7 @@ static void startDebugTask() {
 
 static void stopDebugTask() { debugTaskRunning = false; }
 
-// ==================== 并行处理（无冷却） ====================
+// ==================== 并行处理 ====================
 
 struct WorkerResult {
     size_t processed;
@@ -94,36 +91,62 @@ static WorkerResult workerProcessMobRange(
         Actor* actor = *it;
         if (!actor) continue;
 
-        // 确保是 Mob
         if (!actor->isType(::ActorType::Mob)) continue;
         Mob* mob = static_cast<Mob*>(actor);
 
-        // 执行 AI（无冷却，每次都执行）
-        mob->aiStep();
-        result.processed++;
+        try {
+            mob->aiStep();
+            result.processed++;
+        } catch (const std::exception& e) {
+            getLogger().error("Exception in aiStep: {}", e.what());
+        } catch (...) {
+            getLogger().error("Unknown exception in aiStep");
+        }
     }
 
     return result;
 }
 
-// 获取所有生物（使用 Level::getRuntimeActorList）
 static std::vector<Actor*> collectAllMobs(Level& level) {
     std::vector<Actor*> mobs;
     auto actors = level.getRuntimeActorList();
+    
+    if (config.debug) {
+        getLogger().debug("getRuntimeActorList returned {} actors", actors.size());
+    }
+
     for (Actor* actor : actors) {
-        if (actor && actor->isType(::ActorType::Mob)) {
+        if (!actor) continue;
+        bool isMob = actor->isType(::ActorType::Mob);
+        if (config.debug && isMob) {
+            // 可以打印一些生物信息，如类型ID或名称
+            getLogger().debug("Found Mob: {}", (uint64_t)actor);
+        }
+        if (isMob) {
             mobs.push_back(actor);
         }
     }
+
+    if (config.debug) {
+        getLogger().debug("collectAllMobs found {} mobs", mobs.size());
+    }
+    lastMobCount = mobs.size(); // 记录本次找到的生物数量
     return mobs;
 }
 
 static void parallelProcessMobAI(Level& level) {
     std::vector<Actor*> mobs = collectAllMobs(level);
-    if (mobs.empty()) return;
+    if (mobs.empty()) {
+        if (config.debug) getLogger().debug("No mobs to process");
+        return;
+    }
 
     const size_t numThreads = std::max(1u, std::thread::hardware_concurrency());
     const size_t mobsPerThread = (mobs.size() + numThreads - 1) / numThreads;
+
+    if (config.debug) {
+        getLogger().debug("Processing {} mobs with {} threads", mobs.size(), numThreads);
+    }
 
     std::vector<std::future<WorkerResult>> futures;
     futures.reserve(numThreads);
@@ -138,11 +161,22 @@ static void parallelProcessMobAI(Level& level) {
         }));
     }
 
+    size_t tickProcessed = 0;
     for (auto& future : futures) {
-        auto result = future.get();
-        totalProcessed += result.processed;
+        try {
+            auto result = future.get();
+            tickProcessed += result.processed;
+        } catch (const std::exception& e) {
+            getLogger().error("Future get exception: {}", e.what());
+        }
     }
+
+    totalProcessed += tickProcessed;
     totalTicks++;
+
+    if (config.debug) {
+        getLogger().debug("Processed {} mobs this tick", tickProcessed);
+    }
 }
 
 // 插件生命周期
@@ -176,8 +210,7 @@ bool Optimizer::disable() {
 
 } // namespace mob_ai_optimizer
 
-// ==================== 钩子 ====================
-
+// 钩子
 LL_AUTO_TYPE_INSTANCE_HOOK(
     MobAiStepHook,
     ll::memory::HookPriority::Normal,
@@ -187,7 +220,7 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
 ) {
     using namespace mob_ai_optimizer;
     if (config.enabled) {
-        return; // 由并行任务处理，禁止原版调用
+        return;
     }
     origin();
 }
