@@ -87,7 +87,7 @@ struct WorkerResult {
     size_t processed;
 };
 
-// 纯 C 风格的 SEH 安全调用，不包含任何 C++ 对象
+// 纯 C 风格的 SEH 安全调用
 struct SafeAiStepResult {
     bool success;
     DWORD exceptionCode;
@@ -117,7 +117,7 @@ static WorkerResult workerProcessMobRange(
         Mob* mob = static_cast<Mob*>(actor);
         ActorUniqueID uid = mob->getOrCreateUniqueID();
 
-        // 检查黑名单（使用 C++ 锁，但已无 __try 混合）
+        // 检查黑名单
         {
             std::lock_guard<std::mutex> lock(crashedIdsMutex);
             if (crashedIds.find(uid) != crashedIds.end()) {
@@ -145,8 +145,6 @@ static WorkerResult workerProcessMobRange(
 static std::vector<Actor*> collectAllMobs(Level& level) {
     std::vector<Actor*> mobs;
     auto actors = level.getRuntimeActorList();
-    
-    getLogger().info("getRuntimeActorList returned {} actors", actors.size());
 
     for (Actor* actor : actors) {
         if (!actor) continue;
@@ -155,22 +153,18 @@ static std::vector<Actor*> collectAllMobs(Level& level) {
         }
     }
 
-    getLogger().info("collectAllMobs found {} mobs", mobs.size());
-    lastMobCount = mobs.size();
+    lastMobCount = mobs.size(); // 仅更新统计，不输出日志
     return mobs;
 }
 
 static void parallelProcessMobAI(Level& level) {
     std::vector<Actor*> mobs = collectAllMobs(level);
     if (mobs.empty()) {
-        getLogger().info("No mobs to process");
-        return;
+        return; // 没有生物，直接返回（不输出日志）
     }
 
     const size_t numThreads = std::max(1u, std::thread::hardware_concurrency());
     const size_t mobsPerThread = (mobs.size() + numThreads - 1) / numThreads;
-
-    getLogger().info("Processing {} mobs with {} threads", mobs.size(), numThreads);
 
     std::vector<std::future<WorkerResult>> futures;
     futures.reserve(numThreads);
@@ -199,8 +193,6 @@ static void parallelProcessMobAI(Level& level) {
 
     totalProcessed += tickProcessed;
     totalTicks++;
-
-    getLogger().info("Processed {} mobs this tick", tickProcessed);
 }
 
 // 插件生命周期
