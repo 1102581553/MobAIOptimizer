@@ -17,6 +17,7 @@
 #include <future>
 #include <vector>
 #include <windows.h>
+#include <unordered_set>
 
 namespace mob_ai_optimizer {
 
@@ -24,9 +25,14 @@ static Config config;
 static std::shared_ptr<ll::io::Logger> log;
 static bool debugTaskRunning = false;
 
+// 调试统计
 static size_t totalProcessed = 0;
 static size_t totalTicks = 0;
 static size_t lastMobCount = 0;
+
+// 已崩溃生物 ID 黑名单（全局，线程安全）
+static std::unordered_set<ActorUniqueID> crashedIds;
+static std::mutex crashedIdsMutex;
 
 static ll::io::Logger& getLogger() {
     if (!log) {
@@ -75,6 +81,8 @@ static void startDebugTask() {
 
 static void stopDebugTask() { debugTaskRunning = false; }
 
+// ==================== 并行处理 ====================
+
 struct WorkerResult {
     size_t processed;
 };
@@ -91,13 +99,28 @@ static WorkerResult workerProcessMobRange(
 
         if (!actor->hasCategory(::ActorCategory::Mob)) continue;
         Mob* mob = static_cast<Mob*>(actor);
+        ActorUniqueID uid = mob->getOrCreateUniqueID();
+
+        // 检查黑名单：如果该生物 ID 已崩溃过，直接跳过
+        {
+            std::lock_guard<std::mutex> lock(crashedIdsMutex);
+            if (crashedIds.find(uid) != crashedIds.end()) {
+                continue;
+            }
+        }
 
         __try {
             mob->aiStep();
             result.processed++;
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             DWORD code = GetExceptionCode();
-            getLogger().error("SEH exception in aiStep for mob {}: code 0x{:X}", (uint64_t)mob, code);
+            getLogger().error("SEH exception in aiStep for mob {} (UID {}): code 0x{:X} - added to blacklist",
+                              (uint64_t)mob, uid.rawID, code);
+            // 将崩溃的生物 ID 加入黑名单
+            {
+                std::lock_guard<std::mutex> lock(crashedIdsMutex);
+                crashedIds.insert(uid);
+            }
         }
     }
 
@@ -113,7 +136,6 @@ static std::vector<Actor*> collectAllMobs(Level& level) {
     for (Actor* actor : actors) {
         if (!actor) continue;
         if (actor->hasCategory(::ActorCategory::Mob)) {
-            // 不再打印每个生物的具体指针，避免刷屏
             mobs.push_back(actor);
         }
     }
@@ -166,6 +188,7 @@ static void parallelProcessMobAI(Level& level) {
     getLogger().info("Processed {} mobs this tick", tickProcessed);
 }
 
+// 插件生命周期
 Optimizer& Optimizer::getInstance() {
     static Optimizer instance;
     return instance;
@@ -190,12 +213,17 @@ bool Optimizer::enable() {
 bool Optimizer::disable() {
     stopDebugTask();
     resetStats();
+    {
+        std::lock_guard<std::mutex> lock(crashedIdsMutex);
+        crashedIds.clear();
+    }
     getLogger().info("Disabled");
     return true;
 }
 
 } // namespace mob_ai_optimizer
 
+// 钩子
 LL_AUTO_TYPE_INSTANCE_HOOK(
     MobAiStepHook,
     ll::memory::HookPriority::Normal,
