@@ -8,19 +8,15 @@
 namespace mob_ai_optimizer {
 
 struct Config {
-    int  version = 3;
-    bool enabled = true;
-    bool debug   = false;
+    int  version = 4;                // 配置版本（自增以标识变更）
+    bool enabled = true;              // 总开关
+    bool debug   = false;             // 调试输出开关
 
-    // 动态调节目标
-    int targetTickMs      = 50;
-    int maxPerTickStep    = 4;
-    int cooldownTicksStep = 1;
+    // AI 处理间隔（冷却 ticks）
+    int aiCooldownTicks = 4;           // 每个生物两次 AI 之间的最小间隔 tick 数
 
-    // 内部维护
-    int cleanupIntervalTicks = 100;
-    int maxExpiredAge        = 600;
-    int initialMapReserve    = 1000;
+    // 内部优化参数
+    int initialMapReserve = 1000;      // 冷却表预分配大小
 };
 
 Config& getConfig();
