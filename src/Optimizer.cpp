@@ -16,7 +16,7 @@
 #include <thread>
 #include <future>
 #include <vector>
-#include <windows.h>  // 用于 SEH 异常处理
+#include <windows.h>
 
 namespace mob_ai_optimizer {
 
@@ -24,7 +24,6 @@ static Config config;
 static std::shared_ptr<ll::io::Logger> log;
 static bool debugTaskRunning = false;
 
-// 调试统计
 static size_t totalProcessed = 0;
 static size_t totalTicks = 0;
 static size_t lastMobCount = 0;
@@ -76,8 +75,6 @@ static void startDebugTask() {
 
 static void stopDebugTask() { debugTaskRunning = false; }
 
-// ==================== 并行处理 ====================
-
 struct WorkerResult {
     size_t processed;
 };
@@ -95,7 +92,6 @@ static WorkerResult workerProcessMobRange(
         if (!actor->hasCategory(::ActorCategory::Mob)) continue;
         Mob* mob = static_cast<Mob*>(actor);
 
-        // 使用 SEH 捕获所有异常（包括访问违例和 C++ 异常）
         __try {
             mob->aiStep();
             result.processed++;
@@ -117,7 +113,7 @@ static std::vector<Actor*> collectAllMobs(Level& level) {
     for (Actor* actor : actors) {
         if (!actor) continue;
         if (actor->hasCategory(::ActorCategory::Mob)) {
-            getLogger().info("Found Mob: {}", (uint64_t)actor);
+            // 不再打印每个生物的具体指针，避免刷屏
             mobs.push_back(actor);
         }
     }
@@ -170,7 +166,6 @@ static void parallelProcessMobAI(Level& level) {
     getLogger().info("Processed {} mobs this tick", tickProcessed);
 }
 
-// 插件生命周期
 Optimizer& Optimizer::getInstance() {
     static Optimizer instance;
     return instance;
@@ -201,7 +196,6 @@ bool Optimizer::disable() {
 
 } // namespace mob_ai_optimizer
 
-// 钩子
 LL_AUTO_TYPE_INSTANCE_HOOK(
     MobAiStepHook,
     ll::memory::HookPriority::Normal,
