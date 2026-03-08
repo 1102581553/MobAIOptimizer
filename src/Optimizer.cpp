@@ -21,6 +21,7 @@
 
 namespace mob_ai_optimizer {
 
+// 配置结构（需在 Optimizer.h 中定义）
 static Config config;
 static std::shared_ptr<ll::io::Logger> log;
 static bool debugTaskRunning = false;
@@ -142,13 +143,15 @@ static WorkerResult workerProcessMobRange(
     return result;
 }
 
+// 修改点1：收集生物时排除玩家
 static std::vector<Actor*> collectAllMobs(Level& level) {
     std::vector<Actor*> mobs;
     auto actors = level.getRuntimeActorList();
 
     for (Actor* actor : actors) {
         if (!actor) continue;
-        if (actor->hasCategory(::ActorCategory::Mob)) {
+        // 只收集 Mob 类别且不是玩家的实体
+        if (actor->hasCategory(::ActorCategory::Mob) && !actor->isPlayer()) {
             mobs.push_back(actor);
         }
     }
@@ -239,9 +242,11 @@ LL_AUTO_TYPE_INSTANCE_HOOK(
     void
 ) {
     using namespace mob_ai_optimizer;
-    if (config.enabled) {
+    // 修改点2：优化启用且不是玩家 -> 跳过原 aiStep（因为会在 LevelTick 中并行处理）
+    if (config.enabled && !this->isPlayer()) {
         return;
     }
+    // 否则（未启用优化 或 是玩家）执行原函数
     origin();
 }
 
